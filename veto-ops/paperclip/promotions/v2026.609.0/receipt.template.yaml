@@ -1,0 +1,134 @@
+# Paperclip promotion receipt — copy to artifacts/<promotion-id>/receipt.yaml per run
+# Policy: staging validates v2026.609.0 | prod pins v2026.609.0 | rollback v2026.529.0
+
+receipt:
+  id: "promo-YYYYMMDD-6090"           # e.g. promo-20260616-6090
+  type: paperclip_release_promotion
+  created_at_utc: ""                  # ISO-8601 Z
+  operator: ""                        # who ran the promotion
+  approver: ""                        # who signed acceptance
+
+source:
+  upstream_repo: https://github.com/paperclipai/paperclip
+  upstream_tag: v2026.609.0
+  npm_package: paperclipai@2026.609.0
+  npm_dist_tag: latest
+  veto_main_deployed: false           # MUST remain false
+  rollback_tag: v2026.529.0
+  rollback_npm: paperclipai@2026.529.0
+  image_patches_applied:
+    - patch-paperclip-agent-remove.mjs      # true/false
+    - patch-paperclip-codex-chatgpt-model.mjs  # true/false
+
+urls:
+  staging: https://paperclip-staging.tryveto.com
+  production: https://paperclip.tryveto.com
+
+render:
+  staging:
+    web_service_id: ""                # srv-xxxxxxxxxxxxxxxxxxxx
+    postgres_id: ""                   # dpg-xxxxxxxxxxxxxxxxxxxx
+    pre_deploy_deploy_id: ""          # dep-xxxxxxxxxxxxxxxxxxxx (last known good)
+    post_deploy_deploy_id: ""         # dep-xxxxxxxxxxxxxxxxxxxx (609 deploy)
+    image_digest: ""                  # sha256:… from build
+    deploy_url: ""                    # Render dashboard link
+  production:
+    web_service_id: ""
+    postgres_id: ""
+    pre_deploy_deploy_id: ""
+    post_deploy_deploy_id: ""
+    image_digest: ""
+    deploy_url: ""
+
+backup_gate:
+  staging:
+    completed_at_utc: ""
+    operator: ""
+    render_postgres_backup_id: ""     # Render manual backup ID pre-deploy
+    api_backup_json_path: ""        # artifacts/.../staging-pre-deploy-db-backup.json
+    api_backup_verified: false        # jq or pg_restore --list passed
+    secrets_key_backed_up: false
+    disk_snapshot_id: ""              # if applicable
+  production:
+    completed_at_utc: ""
+    operator: ""
+    render_postgres_backup_id: ""
+    api_backup_json_path: ""
+    api_backup_verified: false
+    secrets_key_backed_up: false
+    disk_snapshot_id: ""
+
+dogfood:
+  company_id: ""
+  agent_id: ""
+  routine_id: ""                      # empty if skipped
+
+smoke_results:
+  script: smoke.sh
+  paperclipai_version: "2026.609.0"
+  staging:
+    ran_at_utc: ""
+    health:
+      status: ""                      # ok
+      version: ""                     # 2026.609.0
+      bootstrap_status: ""            # ready
+    login_browser: ""                 # pass | fail
+    issue_create_id: ""
+    comment_id: ""
+    agent_wake_run_id: ""
+    agent_wake_final_status: ""       # succeeded | failed | cancelled
+    routine_run_id: ""                # empty if skipped
+    routine_status: ""                # pass | skipped | fail
+    secrets_doctor: ""                # pass | fail
+    adapter_list: ""                  # pass | fail
+    post_smoke_backup_path: ""
+    doctor_exit: ""                   # 0 | non-zero
+  production:
+    ran_at_utc: ""
+    health_version: ""
+    login_browser: ""
+    issue_create_id: ""
+    agent_wake_run_id: ""
+    agent_wake_final_status: ""
+    post_smoke_backup_path: ""
+
+acceptance:
+  criteria_met:                     # all must be true for prod
+    A1_version_609_on_staging: false
+    A2_no_veto_main_artifact: false
+    A3_migrations_ok: false
+    A4_login_ok: false
+    A5_issue_comment_ok: false
+    A6_wake_ok: false
+    A7_routine_ok_or_skipped: false
+    A8_secrets_ok: false
+    A9_adapters_ok: false
+    A10_backup_ok: false
+    A11_doctor_ok: false
+    A12_soak_ok: false
+    A13_no_data_loss: false
+  authorized_at_utc: ""
+  authorized_by: ""
+
+prod_deploy:
+  started_at_utc: ""
+  completed_at_utc: ""
+  health_version_post_deploy: ""      # must be 2026.609.0
+  smoke_passed: false
+
+rollback:
+  plan_documented: true
+  n_minus_1_tag: v2026.529.0
+  staging_last_good_529_deploy_id: "" # dep-… for emergency redeploy
+  prod_last_good_529_deploy_id: ""
+  db_restore_required: false
+  db_restore_backup_id: ""            # which backup to restore if needed
+
+notes: |
+  Migrations on 529→609 jump: 0094–0098 (plus 0090–0093 if upgrading from older).
+  Veto theme not deployed; UI overlays live in veto-ops only.
+
+signatures:
+  operator: ""
+  approver: ""
+  completed_at_utc: ""
