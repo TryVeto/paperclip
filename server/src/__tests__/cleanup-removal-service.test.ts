@@ -15,7 +15,10 @@ import {
   issueDocuments,
   issueExecutionDecisions,
   issueReadStates,
+  issueRelations,
   issues,
+  projectWorkspaces,
+  projects,
 } from "@paperclipai/db";
 import {
   getEmbeddedPostgresTestSupport,
@@ -46,13 +49,17 @@ describeEmbeddedPostgres("cleanup removal services", () => {
     await db.delete(heartbeatRunEvents);
     await db.delete(activityLog);
     await db.delete(issueReadStates);
+    await db.delete(issueRelations);
     await db.delete(issueComments);
     await db.delete(issueExecutionDecisions);
+    await db.delete(issueDocuments);
     await db.delete(documentRevisions);
     await db.delete(documents);
     await db.delete(companySkills);
     await db.delete(heartbeatRuns);
     await db.delete(issues);
+    await db.delete(projectWorkspaces);
+    await db.delete(projects);
     await db.delete(agents);
     await db.delete(companies);
   });
@@ -229,6 +236,59 @@ describeEmbeddedPostgres("cleanup removal services", () => {
     await expect(db.select().from(documentRevisions).where(eq(documentRevisions.id, revisionId))).resolves.toHaveLength(0);
     await expect(db.select().from(issueReadStates).where(eq(issueReadStates.companyId, companyId))).resolves.toHaveLength(0);
     await expect(db.select().from(activityLog).where(eq(activityLog.companyId, companyId))).resolves.toHaveLength(0);
+  });
+
+  it("removes project and issue child rows before deleting the company", async () => {
+    const { companyId, agentId, issueId } = await seedFixture();
+    const projectId = randomUUID();
+    const workspaceId = randomUUID();
+    const relatedIssueId = randomUUID();
+
+    await db.insert(projects).values({
+      id: projectId,
+      companyId,
+      name: "Veto",
+      status: "active",
+    });
+
+    await db.insert(projectWorkspaces).values({
+      id: workspaceId,
+      companyId,
+      projectId,
+      name: "Main workspace",
+      sourceType: "local_path",
+      cwd: "/tmp/veto",
+    });
+
+    await db.update(issues).set({ projectId }).where(eq(issues.id, issueId));
+
+    await db.insert(issues).values({
+      id: relatedIssueId,
+      companyId,
+      projectId,
+      title: "Related issue",
+      status: "todo",
+      priority: "medium",
+      createdByUserId: "user-1",
+    });
+
+    await db.insert(issueRelations).values({
+      id: randomUUID(),
+      companyId,
+      issueId,
+      relatedIssueId,
+      type: "blocks",
+    });
+
+    const removed = await companyService(db).remove(companyId);
+
+    expect(removed?.id).toBe(companyId);
+    await expect(db.select().from(companies).where(eq(companies.id, companyId))).resolves.toHaveLength(0);
+    await expect(db.select().from(projects).where(eq(projects.companyId, companyId))).resolves.toHaveLength(0);
+    await expect(db.select().from(projectWorkspaces).where(eq(projectWorkspaces.companyId, companyId))).resolves.toHaveLength(0);
+    await expect(db.select().from(issues).where(eq(issues.companyId, companyId))).resolves.toHaveLength(0);
+    await expect(db.select().from(issueRelations).where(eq(issueRelations.companyId, companyId))).resolves.toHaveLength(0);
+    await expect(db.select().from(agents).where(eq(agents.id, agentId))).resolves.toHaveLength(0);
   });
 
   it("removes heartbeat events by run id before deleting company-owned runs", async () => {
