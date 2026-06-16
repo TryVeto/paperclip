@@ -1,28 +1,41 @@
-import { and, asc, desc, eq, getTableColumns, gte, sql } from "drizzle-orm";
+import { and, asc, desc, eq, getTableColumns, gte, inArray, lt, or, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import { agents, issues, runTraceArchives } from "@paperclipai/db";
 import {
   RUN_TRACE_BUNDLE_VERSION,
   type FeedbackTraceBundleCaptureStatus,
+  type InstanceExperimentalSettings,
   type RunTraceArchive,
   type RunTraceArchiveListItem,
   type RunTraceArchiveStatus,
   type RunTraceBundle,
 } from "@paperclipai/shared";
 import { buildRunTraceBundleForRunId } from "./feedback.js";
+import { instanceSettingsService } from "./instance-settings.js";
 
 const MAX_FLUSH_BATCH = 25;
 const MAX_ARCHIVE_ATTEMPTS = 5;
+const TERMINAL_RUN_STATUSES = new Set(["succeeded", "failed", "cancelled", "timed_out"]);
+const SUCCESSFUL_RUN_STATUSES = new Set(["succeeded", "cancelled"]);
 
-function parseAllowlistedCompanyIds(): Set<string> {
+function parseEnvAllowlistedCompanyIds(): Set<string> | null {
   const raw = process.env.RUN_TRACE_ARCHIVE_COMPANY_IDS?.trim();
-  if (!raw) return new Set();
+  if (!raw) return null;
   return new Set(
     raw
       .split(",")
       .map((value) => value.trim())
       .filter(Boolean),
   );
+}
+
+async function resolveAllowlistedCompanyIds(
+  db: Db,
+  experimental: InstanceExperimentalSettings,
+): Promise<Set<string>> {
+  const envAllowlist = parseEnvAllowlistedCompanyIds();
+  if (envAllowlist) return envAllowlist;
+  return new Set(experimental.runTraceArchiveCompanyIds);
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
@@ -39,7 +52,7 @@ function readIssueIdFromContext(contextSnapshot: unknown): string | null {
 
 function summarizeActivity(bundle: RunTraceBundle | null): Array<Record<string, unknown>> {
   if (!bundle) return [];
-  const activityFile = bundle.files.find((file: { path?: string }) => file.path === "paperclip/activity-log.json");
+  const activityFile = bundle.files.find((file) => file.path === "paperclip/activity-log.json");
   if (!activityFile) return [];
   try {
     const parsed = JSON.parse(activityFile.contents) as unknown;
@@ -94,11 +107,17 @@ function mapArchiveRow(
 const archiveColumns = getTableColumns(runTraceArchives);
 
 export function runTraceArchiveService(db: Db) {
-  const allowlistedCompanyIds = parseAllowlistedCompanyIds();
+  const settingsSvc = instanceSettingsService(db);
 
   return {
-    isCompanyAllowlisted(companyId: string) {
-      return allowlistedCompanyIds.has(companyId);
+    async resolveAllowlistedCompanyIds() {
+      const experimental = await settingsSvc.getExperimental();
+      return resolveAllowlistedCompanyIds(db, experimental);
+    },
+
+    async isCompanyAllowlisted(companyId: string) {
+      const allowlist = await this.resolveAllowlistedCompanyIds();
+      return allowlist.has(companyId);
     },
 
     async notifyRunTerminalStatus(run: {
@@ -108,8 +127,11 @@ export function runTraceArchiveService(db: Db) {
       status: string;
       contextSnapshot: unknown;
     }) {
-      if (!allowlistedCompanyIds.has(run.companyId)) return null;
-      if (!["succeeded", "failed", "cancelled", "timed_out"].includes(run.status)) return null;
+      if (!TERMINAL_RUN_STATUSES.has(run.status)) return null;
+
+      const experimental = await settingsSvc.getExperimental();
+      const allowlist = await resolveAllowlistedCompanyIds(db, experimental);
+      if (!allowlist.has(run.companyId)) return null;
 
       const issueId = readIssueIdFromContext(run.contextSnapshot);
       const inserted = await db
@@ -130,7 +152,42 @@ export function runTraceArchiveService(db: Db) {
       return inserted ? mapArchiveRow(inserted) : null;
     },
 
+    async pruneExpiredArchives(input?: { now?: Date }) {
+      const now = input?.now ?? new Date();
+      const experimental = await settingsSvc.getExperimental();
+      const succeededCutoff = new Date(
+        now.getTime() - experimental.runTraceArchiveSucceededRetentionDays * 86_400_000,
+      );
+      const failedCutoff = new Date(
+        now.getTime() - experimental.runTraceArchiveFailedRetentionDays * 86_400_000,
+      );
+
+      const deleted = await db
+        .delete(runTraceArchives)
+        .where(
+          and(
+            or(
+              and(
+                inArray(runTraceArchives.runStatus, ["succeeded", "cancelled"]),
+                inArray(runTraceArchives.status, ["ready", "failed"]),
+                lt(runTraceArchives.createdAt, succeededCutoff),
+              ),
+              and(
+                inArray(runTraceArchives.runStatus, ["failed", "timed_out"]),
+                inArray(runTraceArchives.status, ["ready", "failed"]),
+                lt(runTraceArchives.createdAt, failedCutoff),
+              ),
+            ),
+          ),
+        )
+        .returning({ id: runTraceArchives.id });
+
+      return { prunedCount: deleted.length };
+    },
+
     async flushPendingArchives(input?: { companyId?: string; archiveId?: string; limit?: number }) {
+      await this.pruneExpiredArchives();
+
       const filters = [eq(runTraceArchives.status, "pending")];
       if (input?.companyId) filters.push(eq(runTraceArchives.companyId, input.companyId));
       if (input?.archiveId) filters.push(eq(runTraceArchives.id, input.archiveId));
@@ -274,19 +331,6 @@ export function runTraceArchiveService(db: Db) {
       });
     },
 
-    async getArchiveBundleByRunId(input: { companyId: string; runId: string }) {
-      const row = await db
-        .select()
-        .from(runTraceArchives)
-        .where(and(eq(runTraceArchives.companyId, input.companyId), eq(runTraceArchives.runId, input.runId)))
-        .then((rows) => rows[0] ?? null);
-      if (!row || row.status !== "ready") return null;
-      return buildRunTraceBundleForRunId(db, {
-        companyId: row.companyId,
-        runId: row.runId,
-      });
-    },
-
     pendingCount(companyId?: string) {
       const filters = [eq(runTraceArchives.status, "pending")];
       if (companyId) filters.push(eq(runTraceArchives.companyId, companyId));
@@ -300,3 +344,6 @@ export function runTraceArchiveService(db: Db) {
 }
 
 export type RunTraceArchiveService = ReturnType<typeof runTraceArchiveService>;
+
+/** @internal Exported for integration tests. */
+export { SUCCESSFUL_RUN_STATUSES, TERMINAL_RUN_STATUSES };

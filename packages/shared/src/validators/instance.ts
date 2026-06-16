@@ -8,6 +8,10 @@ import {
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MAX_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
   MIN_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
+  DEFAULT_RUN_TRACE_ARCHIVE_SUCCEEDED_RETENTION_DAYS,
+  DEFAULT_RUN_TRACE_ARCHIVE_FAILED_RETENTION_DAYS,
+  MIN_RUN_TRACE_ARCHIVE_RETENTION_DAYS,
+  MAX_RUN_TRACE_ARCHIVE_RETENTION_DAYS,
 } from "../types/instance.js";
 import { feedbackDataSharingPreferenceSchema } from "./feedback.js";
 
@@ -49,6 +53,19 @@ export const instanceExperimentalSettingsSchema = z.object({
     .min(MIN_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS)
     .max(MAX_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS)
     .default(DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS),
+  runTraceArchiveCompanyIds: z.array(z.string().uuid()).default([]),
+  runTraceArchiveSucceededRetentionDays: z
+    .number()
+    .int()
+    .min(MIN_RUN_TRACE_ARCHIVE_RETENTION_DAYS)
+    .max(MAX_RUN_TRACE_ARCHIVE_RETENTION_DAYS)
+    .default(DEFAULT_RUN_TRACE_ARCHIVE_SUCCEEDED_RETENTION_DAYS),
+  runTraceArchiveFailedRetentionDays: z
+    .number()
+    .int()
+    .min(MIN_RUN_TRACE_ARCHIVE_RETENTION_DAYS)
+    .max(MAX_RUN_TRACE_ARCHIVE_RETENTION_DAYS)
+    .default(DEFAULT_RUN_TRACE_ARCHIVE_FAILED_RETENTION_DAYS),
 }).strict();
 
 export const patchInstanceExperimentalSettingsSchema = instanceExperimentalSettingsSchema.partial();

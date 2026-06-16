@@ -4,6 +4,8 @@ import {
   DEFAULT_FEEDBACK_DATA_SHARING_PREFERENCE,
   DEFAULT_BACKUP_RETENTION,
   DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
+  DEFAULT_RUN_TRACE_ARCHIVE_SUCCEEDED_RETENTION_DAYS,
+  DEFAULT_RUN_TRACE_ARCHIVE_FAILED_RETENTION_DAYS,
   instanceGeneralSettingsSchema,
   type InstanceGeneralSettings,
   instanceExperimentalSettingsSchema,
@@ -51,6 +53,13 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
       issueGraphLivenessAutoRecoveryLookbackHours:
         parsed.data.issueGraphLivenessAutoRecoveryLookbackHours ??
         DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
+      runTraceArchiveCompanyIds: parsed.data.runTraceArchiveCompanyIds ?? [],
+      runTraceArchiveSucceededRetentionDays:
+        parsed.data.runTraceArchiveSucceededRetentionDays ??
+        DEFAULT_RUN_TRACE_ARCHIVE_SUCCEEDED_RETENTION_DAYS,
+      runTraceArchiveFailedRetentionDays:
+        parsed.data.runTraceArchiveFailedRetentionDays ??
+        DEFAULT_RUN_TRACE_ARCHIVE_FAILED_RETENTION_DAYS,
     };
   }
   return {
@@ -63,6 +72,9 @@ export function normalizeExperimentalSettings(raw: unknown): InstanceExperimenta
     enableIssueGraphLivenessAutoRecovery: false,
     issueGraphLivenessAutoRecoveryLookbackHours:
       DEFAULT_ISSUE_GRAPH_LIVENESS_AUTO_RECOVERY_LOOKBACK_HOURS,
+    runTraceArchiveCompanyIds: [],
+    runTraceArchiveSucceededRetentionDays: DEFAULT_RUN_TRACE_ARCHIVE_SUCCEEDED_RETENTION_DAYS,
+    runTraceArchiveFailedRetentionDays: DEFAULT_RUN_TRACE_ARCHIVE_FAILED_RETENTION_DAYS,
   };
 }
 

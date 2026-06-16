@@ -21,6 +21,9 @@ describe("instance settings service", () => {
       autoRestartDevServerWhenIdle: true,
       enableIssueGraphLivenessAutoRecovery: true,
       issueGraphLivenessAutoRecoveryLookbackHours: 48,
+      runTraceArchiveCompanyIds: [],
+      runTraceArchiveSucceededRetentionDays: 30,
+      runTraceArchiveFailedRetentionDays: 90,
     });
   });
 });

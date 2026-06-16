@@ -58,9 +58,7 @@ Phase 0 covers narrow behavior evals for the Paperclip heartbeat skill:
 ### Phases
 
 - **Phase 0 (current):** Promptfoo bootstrap - narrow behavior evals with deterministic assertions
-- **Phase 1:** TypeScript scenario runner with hard checks on archived run traces
-- **Phase 2:** Matrix runner — same task × multiple agent/config bundles
-- **Phase 3:** Corpus promotion from labeled production traces
-- **Phase 4:** Always-on trace archive on allowlisted companies (server hook)
-
-See `evals/operator/README.md` for the Veto hill-climbing operator workflow.
+- **Phase 1:** TypeScript eval harness with seeded scenarios and hard checks
+- **Phase 2:** Pairwise and rubric scoring layer
+- **Phase 3:** Efficiency metrics integration
+- **Phase 4:** Production-case ingestion via run trace archive API

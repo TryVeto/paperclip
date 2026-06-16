@@ -26,6 +26,11 @@ export interface InstanceGeneralSettings {
   backupRetention: BackupRetentionPolicy;
 }
 
+export const DEFAULT_RUN_TRACE_ARCHIVE_SUCCEEDED_RETENTION_DAYS = 30;
+export const DEFAULT_RUN_TRACE_ARCHIVE_FAILED_RETENTION_DAYS = 90;
+export const MIN_RUN_TRACE_ARCHIVE_RETENTION_DAYS = 1;
+export const MAX_RUN_TRACE_ARCHIVE_RETENTION_DAYS = 365;
+
 export interface InstanceExperimentalSettings {
   enableEnvironments: boolean;
   enableIsolatedWorkspaces: boolean;
@@ -35,6 +40,12 @@ export interface InstanceExperimentalSettings {
   autoRestartDevServerWhenIdle: boolean;
   enableIssueGraphLivenessAutoRecovery: boolean;
   issueGraphLivenessAutoRecoveryLookbackHours: number;
+  /** Company IDs for which terminal heartbeat runs are archived. Overridden by RUN_TRACE_ARCHIVE_COMPANY_IDS env when set. */
+  runTraceArchiveCompanyIds: string[];
+  /** Delete ready archives for successful/cancelled runs older than this many days. */
+  runTraceArchiveSucceededRetentionDays: number;
+  /** Delete ready/failed archive rows for failed/timed_out runs older than this many days. */
+  runTraceArchiveFailedRetentionDays: number;
 }
 
 export interface InstanceSettings {

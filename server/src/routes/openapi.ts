@@ -869,6 +869,43 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "get",
+  path: "/api/companies/{companyId}/run-traces",
+  tags: ["companies"],
+  summary: "List archived run traces for a company",
+  request: {
+    params: z.object({ companyId: z.string() }),
+    query: z.object({
+      since: z.string().datetime().optional(),
+      agentId: z.string().uuid().optional(),
+      runId: z.string().uuid().optional(),
+      status: z.enum(["pending", "ready", "failed"]).optional(),
+      runStatus: z.string().optional(),
+      limit: z.coerce.number().int().min(1).max(500).optional(),
+    }).optional(),
+  },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/run-traces/{archiveId}",
+  tags: ["companies"],
+  summary: "Get a run trace archive row",
+  request: { params: z.object({ archiveId: z.string().uuid() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/run-traces/{archiveId}/bundle",
+  tags: ["companies"],
+  summary: "Get the redacted run trace bundle for an archive",
+  request: { params: z.object({ archiveId: z.string().uuid() }) },
+  responses: { 200: r.ok(), 401: r.unauthorized, 403: r.forbidden, 404: r.notFound },
+});
+
+registry.registerPath({
   method: "post",
   path: "/api/companies/{companyId}/exports",
   tags: ["companies"],
