@@ -6,7 +6,7 @@ export interface GeneralSettingsContextValue {
 }
 
 const GeneralSettingsContext = createContext<GeneralSettingsContextValue>({
-  keyboardShortcutsEnabled: false,
+  keyboardShortcutsEnabled: true,
 });
 
 export function GeneralSettingsProvider({

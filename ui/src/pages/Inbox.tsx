@@ -63,6 +63,7 @@ import { IssueFiltersPopover } from "../components/IssueFiltersPopover";
 import { IssueRow } from "../components/IssueRow";
 import { BlockedInboxView } from "../components/BlockedInboxView";
 import { SwipeToArchive } from "../components/SwipeToArchive";
+import { InboxActionBar } from "../components/InboxActionBar";
 
 import { StatusIcon } from "../components/StatusIcon";
 import { cn } from "../lib/utils";
@@ -1757,6 +1758,164 @@ export function Inbox() {
     navigate,
   };
 
+  const resolveNavEntryAt = useCallback((idx: number): { issue?: Issue; item?: InboxWorkItem } => {
+    const entry = flatNavItems[idx];
+    if (!entry) return {};
+    if (entry.type === "child") return { issue: entry.issue };
+    if (entry.type === "top") return { item: entry.item };
+    return {};
+  }, [flatNavItems]);
+
+  const openInboxNavIndex = useCallback((idx: number) => {
+    const { issue, item } = resolveNavEntryAt(idx);
+    if (issue) {
+      const pathId = issue.identifier ?? issue.id;
+      const detailState = armIssueDetailInboxQuickArchive(withIssueDetailHeaderSeed(issueLinkState, issue));
+      rememberIssueDetailLocationState(pathId, detailState);
+      void prefetchIssueDetail(queryClient, pathId, { issue });
+      navigate(createIssueDetailPath(pathId), { state: detailState });
+      return;
+    }
+    if (!item) return;
+    if (item.kind === "issue") {
+      const pathId = item.issue.identifier ?? item.issue.id;
+      const detailState = armIssueDetailInboxQuickArchive(
+        withIssueDetailHeaderSeed(issueLinkState, item.issue),
+      );
+      rememberIssueDetailLocationState(pathId, detailState);
+      void prefetchIssueDetail(queryClient, pathId, { issue: item.issue });
+      navigate(createIssueDetailPath(pathId), { state: detailState });
+    } else if (item.kind === "approval") {
+      navigate(`/approvals/${item.approval.id}`);
+    } else if (item.kind === "failed_run") {
+      navigate(`/agents/${item.run.agentId}/runs/${item.run.id}`);
+    }
+  }, [issueLinkState, navigate, queryClient, resolveNavEntryAt]);
+
+  const archiveInboxNavIndex = useCallback((idx: number) => {
+    const { issue, item } = resolveNavEntryAt(idx);
+    if (issue) {
+      if (!nonInboxSearchIssueIds.has(issue.id) && !archivingIssueIds.has(issue.id)) {
+        archiveIssueMutation.mutate(issue.id);
+      }
+      return;
+    }
+    if (!item) return;
+    if (item.kind === "issue") {
+      if (!nonInboxSearchIssueIds.has(item.issue.id) && !archivingIssueIds.has(item.issue.id)) {
+        archiveIssueMutation.mutate(item.issue.id);
+      }
+    } else {
+      const key = getInboxWorkItemKey(item);
+      if (!archivingNonIssueIds.has(key)) handleArchiveNonIssue(key);
+    }
+  }, [
+    archivingIssueIds,
+    archivingNonIssueIds,
+    archiveIssueMutation,
+    handleArchiveNonIssue,
+    nonInboxSearchIssueIds,
+    resolveNavEntryAt,
+  ]);
+
+  const markReadInboxNavIndex = useCallback((idx: number) => {
+    const { issue, item } = resolveNavEntryAt(idx);
+    if (issue) {
+      if (issue.isUnreadForMe && !fadingOutIssues.has(issue.id)) markReadMutation.mutate(issue.id);
+      return;
+    }
+    if (!item) return;
+    if (item.kind === "issue") {
+      if (item.issue.isUnreadForMe && !fadingOutIssues.has(item.issue.id)) {
+        markReadMutation.mutate(item.issue.id);
+      }
+    } else {
+      const key = getInboxWorkItemKey(item);
+      if (!readItems.has(key)) handleMarkNonIssueRead(key);
+    }
+  }, [
+    fadingOutIssues,
+    handleMarkNonIssueRead,
+    markReadMutation,
+    readItems,
+    resolveNavEntryAt,
+  ]);
+
+  const markUnreadInboxNavIndex = useCallback((idx: number) => {
+    const { issue, item } = resolveNavEntryAt(idx);
+    if (issue) {
+      markUnreadMutation.mutate(issue.id);
+      return;
+    }
+    if (!item) return;
+    if (item.kind === "issue") markUnreadMutation.mutate(item.issue.id);
+    else markItemUnread(getInboxWorkItemKey(item));
+  }, [markItemUnread, markUnreadMutation, resolveNavEntryAt]);
+
+  const selectedInboxCapabilities = useMemo(() => {
+    const empty = {
+      canOpen: false,
+      canArchive: false,
+      canMarkRead: false,
+      canMarkUnread: false,
+      archiveDisabled: false,
+    };
+    if (!canArchiveFromTab || selectedIndex < 0 || selectedIndex >= flatNavItems.length) return empty;
+
+    const entry = flatNavItems[selectedIndex];
+    if (entry.type === "group") return empty;
+
+    if (entry.type === "child") {
+      const issue = entry.issue;
+      const canArchive =
+        !nonInboxSearchIssueIds.has(issue.id) && !archivingIssueIds.has(issue.id);
+      return {
+        canOpen: true,
+        canArchive,
+        archiveDisabled: archivingIssueIds.has(issue.id) || archiveIssueMutation.isPending,
+        canMarkRead: issue.isUnreadForMe === true && !fadingOutIssues.has(issue.id),
+        canMarkUnread: issue.isUnreadForMe !== true,
+      };
+    }
+
+    const item = entry.item;
+    if (item.kind === "issue") {
+      const issue = item.issue;
+      const canArchive =
+        !nonInboxSearchIssueIds.has(issue.id) && !archivingIssueIds.has(issue.id);
+      return {
+        canOpen: true,
+        canArchive,
+        archiveDisabled: archivingIssueIds.has(issue.id) || archiveIssueMutation.isPending,
+        canMarkRead: issue.isUnreadForMe === true && !fadingOutIssues.has(issue.id),
+        canMarkUnread: issue.isUnreadForMe !== true,
+      };
+    }
+
+    const key = getInboxWorkItemKey(item);
+    return {
+      canOpen: true,
+      canArchive: !archivingNonIssueIds.has(key),
+      archiveDisabled: archivingNonIssueIds.has(key),
+      canMarkRead: !readItems.has(key) && !fadingNonIssueItems.has(key),
+      canMarkUnread: readItems.has(key),
+    };
+  }, [
+    archiveIssueMutation.isPending,
+    archivingIssueIds,
+    archivingNonIssueIds,
+    canArchiveFromTab,
+    fadingNonIssueItems,
+    fadingOutIssues,
+    flatNavItems,
+    nonInboxSearchIssueIds,
+    readItems,
+    selectedIndex,
+  ]);
+
+  const showInboxActionBar =
+    canArchiveFromTab && selectedIndex >= 0 && selectedIndex < flatNavItems.length;
+
   // Keyboard shortcuts (mail-client style) — single stable listener using refs
   useEffect(() => {
     if (!keyboardShortcutsEnabled) return;
@@ -1805,15 +1964,6 @@ export function Inbox() {
       const navCount = navItems.length;
       if (navCount === 0) return;
 
-      /** Resolve the nav entry at selectedIndex to an issue (for child entries) or work item. */
-      const resolveNavEntry = (idx: number): { issue?: Issue; item?: InboxWorkItem } => {
-        const entry = navItems[idx];
-        if (!entry) return {};
-        if (entry.type === "child") return { issue: entry.issue };
-        if (entry.type === "top") return { item: entry.item };
-        return {};
-      };
-
       switch (e.key) {
         case "j":
         case "ArrowDown": {
@@ -1837,77 +1987,29 @@ export function Inbox() {
           break;
         }
         case "a":
-        case "y": {
+        case "y":
+        case "e": {
           if (st.selectedIndex < 0 || st.selectedIndex >= navCount) return;
           e.preventDefault();
-          const { issue, item } = resolveNavEntry(st.selectedIndex);
-          if (issue) {
-            if (!st.nonInboxSearchIssueIds.has(issue.id) && !st.archivingIssueIds.has(issue.id)) act.archiveIssue(issue.id);
-          } else if (item) {
-            if (item.kind === "issue") {
-              if (!st.nonInboxSearchIssueIds.has(item.issue.id) && !st.archivingIssueIds.has(item.issue.id)) {
-                act.archiveIssue(item.issue.id);
-              }
-            } else {
-              const key = getInboxWorkItemKey(item);
-              if (!st.archivingNonIssueIds.has(key)) act.archiveNonIssue(key);
-            }
-          }
+          archiveInboxNavIndex(st.selectedIndex);
           break;
         }
         case "U": {
           if (st.selectedIndex < 0 || st.selectedIndex >= navCount) return;
           e.preventDefault();
-          const { issue, item } = resolveNavEntry(st.selectedIndex);
-          if (issue) {
-            act.markUnreadIssue(issue.id);
-          } else if (item) {
-            if (item.kind === "issue") act.markUnreadIssue(item.issue.id);
-            else act.markNonIssueUnread(getInboxWorkItemKey(item));
-          }
+          markUnreadInboxNavIndex(st.selectedIndex);
           break;
         }
         case "r": {
           if (st.selectedIndex < 0 || st.selectedIndex >= navCount) return;
           e.preventDefault();
-          const { issue, item } = resolveNavEntry(st.selectedIndex);
-          if (issue) {
-            if (issue.isUnreadForMe && !st.fadingOutIssues.has(issue.id)) act.markRead(issue.id);
-          } else if (item) {
-            if (item.kind === "issue") {
-              if (item.issue.isUnreadForMe && !st.fadingOutIssues.has(item.issue.id)) act.markRead(item.issue.id);
-            } else {
-              const key = getInboxWorkItemKey(item);
-              if (!st.readItems.has(key)) act.markNonIssueRead(key);
-            }
-          }
+          markReadInboxNavIndex(st.selectedIndex);
           break;
         }
         case "Enter": {
           if (st.selectedIndex < 0 || st.selectedIndex >= navCount) return;
           e.preventDefault();
-          const { issue, item } = resolveNavEntry(st.selectedIndex);
-          if (issue) {
-            const pathId = issue.identifier ?? issue.id;
-            const detailState = armIssueDetailInboxQuickArchive(withIssueDetailHeaderSeed(issueLinkState, issue));
-            rememberIssueDetailLocationState(pathId, detailState);
-            void prefetchIssueDetail(queryClient, pathId, { issue });
-            act.navigate(createIssueDetailPath(pathId), { state: detailState });
-          } else if (item) {
-            if (item.kind === "issue") {
-              const pathId = item.issue.identifier ?? item.issue.id;
-              const detailState = armIssueDetailInboxQuickArchive(
-                withIssueDetailHeaderSeed(issueLinkState, item.issue),
-              );
-              rememberIssueDetailLocationState(pathId, detailState);
-              void prefetchIssueDetail(queryClient, pathId, { issue: item.issue });
-              act.navigate(createIssueDetailPath(pathId), { state: detailState });
-            } else if (item.kind === "approval") {
-              act.navigate(`/approvals/${item.approval.id}`);
-            } else if (item.kind === "failed_run") {
-              act.navigate(`/agents/${item.run.agentId}/runs/${item.run.id}`);
-            }
-          }
+          openInboxNavIndex(st.selectedIndex);
           break;
         }
         default:
@@ -1916,7 +2018,14 @@ export function Inbox() {
     };
     window.addEventListener("keydown", handleKeyDown);
     return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [issueLinkState, keyboardShortcutsEnabled]);
+  }, [
+    archiveInboxNavIndex,
+    issueLinkState,
+    keyboardShortcutsEnabled,
+    markReadInboxNavIndex,
+    markUnreadInboxNavIndex,
+    openInboxNavIndex,
+  ]);
 
   // Scroll selected item into view
   useEffect(() => {
@@ -2828,6 +2937,20 @@ export function Inbox() {
           </div>
         </>
       )}
+
+      <InboxActionBar
+        visible={showInboxActionBar}
+        isMobile={isMobile}
+        canOpen={selectedInboxCapabilities.canOpen}
+        canArchive={selectedInboxCapabilities.canArchive}
+        canMarkRead={selectedInboxCapabilities.canMarkRead}
+        canMarkUnread={selectedInboxCapabilities.canMarkUnread}
+        archiveDisabled={selectedInboxCapabilities.archiveDisabled}
+        onOpen={() => openInboxNavIndex(selectedIndex)}
+        onArchive={() => archiveInboxNavIndex(selectedIndex)}
+        onMarkRead={() => markReadInboxNavIndex(selectedIndex)}
+        onMarkUnread={() => markUnreadInboxNavIndex(selectedIndex)}
+      />
 
     </div>
   );
