@@ -268,16 +268,16 @@
 }
 
 .dark *::-webkit-scrollbar-track {
-  background: oklch(0.205 0 0);
+  background: oklch(0.205 0.008 270);
 }
 
 .dark *::-webkit-scrollbar-thumb {
-  background: oklch(0.4 0 0);
+  background: oklch(0.4 0.008 270);
   border-radius: 4px;
 }
 
 .dark *::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.5 0 0);
+  background: oklch(0.5 0.008 270);
 }
 
 /* Auto-hide scrollbar: thin, stable gutter with the thumb visible only on hover */
@@ -300,30 +300,30 @@
 }
 /* Light mode scrollbar on hover */
 .scrollbar-auto-hide:hover {
-  scrollbar-color: oklch(0.7 0 0) transparent;
+  scrollbar-color: oklch(0.7 0.006 270) transparent;
 }
 .scrollbar-auto-hide:hover::-webkit-scrollbar-track {
   background: transparent !important;
 }
 .scrollbar-auto-hide:hover::-webkit-scrollbar-thumb {
-  background: oklch(0.7 0 0) !important;
+  background: oklch(0.7 0.006 270) !important;
   border-radius: 999px !important;
 }
 .scrollbar-auto-hide:hover::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.6 0 0) !important;
+  background: oklch(0.6 0.006 270) !important;
 }
 /* Dark mode scrollbar on hover */
 .dark .scrollbar-auto-hide:hover {
-  scrollbar-color: oklch(0.4 0 0) transparent;
+  scrollbar-color: oklch(0.4 0.008 270) transparent;
 }
 .dark .scrollbar-auto-hide:hover::-webkit-scrollbar-track {
   background: transparent !important;
 }
 .dark .scrollbar-auto-hide:hover::-webkit-scrollbar-thumb {
-  background: oklch(0.4 0 0) !important;
+  background: oklch(0.4 0.008 270) !important;
 }
 .dark .scrollbar-auto-hide:hover::-webkit-scrollbar-thumb:hover {
-  background: oklch(0.5 0 0) !important;
+  background: oklch(0.5 0.008 270) !important;
 }
 
 /* Typing indicator — three bouncing dots, used inside an agent chat bubble */
@@ -483,7 +483,7 @@
 }
 
 @keyframes hb-blink {
-  0%, 49.9% { background-color: #DC2626; }
+  0%, 49.9% { background-color: var(--destructive); }
   50%, 100% { background-color: var(--background); }
 }
 
@@ -679,14 +679,14 @@
 }
 
 .paperclip-mdxeditor-content a:not(.paperclip-mention-chip):not(.paperclip-project-mention-chip) {
-  color: color-mix(in oklab, var(--foreground) 76%, #0969da 24%);
+  color: color-mix(in oklab, var(--foreground) 60%, oklch(0.5 0.09 265) 40%);
   text-decoration: underline;
   text-underline-offset: 0.15em;
   cursor: pointer;
 }
 
 .dark .paperclip-mdxeditor-content a:not(.paperclip-mention-chip):not(.paperclip-project-mention-chip) {
-  color: color-mix(in oklab, var(--foreground) 80%, #58a6ff 20%);
+  color: color-mix(in oklab, var(--foreground) 60%, oklch(0.72 0.08 265) 40%);
 }
 
 .paperclip-mdxeditor-content a.paperclip-mention-chip,
@@ -1076,7 +1076,7 @@ a.paperclip-mention-chip[data-mention-kind="agent"]::before {
 }
 
 .paperclip-markdown a {
-  color: color-mix(in oklab, var(--foreground) 76%, #0969da 24%);
+  color: color-mix(in oklab, var(--foreground) 60%, oklch(0.5 0.09 265) 40%);
   text-decoration: underline;
   text-underline-offset: 0.15em;
   cursor: pointer;
@@ -1106,7 +1106,7 @@ a.paperclip-mention-chip[data-mention-kind="agent"]::before {
 }
 
 .dark .paperclip-markdown a {
-  color: color-mix(in oklab, var(--foreground) 80%, #58a6ff 20%);
+  color: color-mix(in oklab, var(--foreground) 60%, oklch(0.72 0.08 265) 40%);
 }
 
 .paperclip-markdown blockquote {
