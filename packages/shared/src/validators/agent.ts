@@ -98,6 +98,7 @@ export const updateAgentSchema = createAgentSchema
   .partial()
   .extend({
     permissions: z.never().optional(),
+    avatarAssetId: z.string().uuid().nullable().optional(),
     replaceAdapterConfig: z.boolean().optional(),
     status: z.enum(AGENT_STATUSES).optional(),
     spentMonthlyCents: z.number().int().nonnegative().optional(),

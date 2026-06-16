@@ -482,6 +482,8 @@ function wikiMaintainerAgent(): Agent {
     role: "general",
     title: "LLM Wiki Maintainer",
     icon: "book-open",
+    avatarAssetId: null,
+    avatarUrl: null,
     status: "idle",
     reportsTo: null,
     capabilities: "Maintains the wiki",
