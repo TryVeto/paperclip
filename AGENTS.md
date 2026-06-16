@@ -219,3 +219,14 @@ PR #2218 (`feat/external-adapter-phase1`) adds external adapter support. See roo
 - `createServerAdapter()` must include ALL optional fields (especially `detectModel`)
 - Built-in UI adapters can shadow external plugin parsers — remove built-in when fully externalizing
 - Reference external adapters: Hermes (`@henkey/hermes-paperclip-adapter` or `file:`) and Droid (npm)
+
+## Cursor Cloud specific instructions
+
+The Cloud VM already has dependencies installed by the startup update script (`pnpm install`). Node 20+ and pnpm 9.15.x are available.
+
+- Run the app with `pnpm dev` (watch) or `pnpm dev:once` (no watch). It starts a single process serving both the API and the Vite-built UI at `http://localhost:3100` (binds `127.0.0.1`). See `doc/DEVELOPING.md` for full options.
+- No database service to start: with `DATABASE_URL` unset, the server boots an embedded PostgreSQL in-process (data under `~/.paperclip/instances/default/db`) and auto-applies migrations on startup. First boot is slower because it initializes the cluster and applies all migrations. No Docker needed for dev.
+- The dev runner is idempotent per repo/instance: if a dev server is already alive it reports the existing process instead of starting a duplicate. Use `pnpm dev:list` / `pnpm dev:stop` to inspect or stop it. Verify health with `curl http://localhost:3100/api/health` (expect `{"status":"ok"}`).
+- Standard verification commands live in `doc/DEVELOPING.md` / root `package.json`: `pnpm test` (Vitest, the cheap default), `pnpm typecheck`, `pnpm build`. There is no repo-level `lint` script — quality gates are typecheck/test/build.
+- `pnpm test` note: a small number of integration tests under `server/src/__tests__/` (worktree-runtime provisioning and adapter-execute suites) spawn real `git`/`pnpm`/custom binaries in temp repos and can time out or fail in this sandbox. These are environment-sensitive, not setup regressions; the rest of the Vitest suite passes.
+- Agent execution (heartbeats running an agent's work) requires a local agent CLI on `PATH` (e.g. `claude`, `codex`) and/or LLM API keys (`ANTHROPIC_API_KEY` / `OPENAI_API_KEY`). Without them, creating a company succeeds and the control plane/UI work fully, but the seeded starter task fails with a "RECOVERY NEEDED / no live execution path" error. This is expected in a bare cloud VM, not a bug — those are optional dependencies for the control plane.
