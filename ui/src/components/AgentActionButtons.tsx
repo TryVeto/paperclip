@@ -11,6 +11,7 @@ import {
   RotateCcw,
   Trash2,
   CheckCircle2,
+  MessageSquare,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -21,6 +22,8 @@ import {
 import { AgentStatusBadge } from "./StatusBadge";
 import { agentsApi } from "../api/agents";
 import { ApiError } from "../api/client";
+import { findOrCreateAgentConversationIssue } from "../lib/agentConversationIssue";
+import { createIssueDetailLocationState, createIssueDetailPath } from "../lib/issueDetailBreadcrumb";
 import { queryKeys } from "../lib/queryKeys";
 import { agentRouteRef } from "../lib/utils";
 import { useDialogActions } from "../context/DialogContext";
@@ -154,6 +157,7 @@ export function AgentActionButtons({
   workActionsDisabled = false,
   workActionsDisabledReason,
   navigateToRunOnInvoke = true,
+  showTalkButton = false,
   onActionError,
   children,
   className,
@@ -164,6 +168,7 @@ export function AgentActionButtons({
   assignLabel?: string;
   runLabel?: string;
   showStatus?: boolean;
+  showTalkButton?: boolean;
   actionsDisabled?: boolean;
   workActionsDisabled?: boolean;
   workActionsDisabledReason?: string;
@@ -288,8 +293,43 @@ export function AgentActionButtons({
     },
   });
 
+  const openAgentConversation = useMutation({
+    mutationFn: async () => {
+      if (!resolvedCompanyId) {
+        throw new Error("Company is not ready");
+      }
+      return findOrCreateAgentConversationIssue(resolvedCompanyId, {
+        id: agent.id,
+        name: agent.name,
+      });
+    },
+    onSuccess: async (issue) => {
+      onActionError?.(null);
+      if (resolvedCompanyId) {
+        await queryClient.invalidateQueries({ queryKey: queryKeys.issues.list(resolvedCompanyId) });
+      }
+      const issueRef = issue.identifier ?? issue.id;
+      navigate(createIssueDetailPath(issueRef), {
+        state: createIssueDetailLocationState(
+          agent.name,
+          `/agents/${canonicalAgentRef}/dashboard`,
+          "issues",
+        ),
+      });
+    },
+    onError: (err) => {
+      reportError(err instanceof Error ? err.message : "Failed to open conversation");
+    },
+  });
+
   const isPendingApproval = agent.status === "pending_approval";
   const disabled = actionsDisabled || agentAction.isPending;
+  const talkDisabled =
+    disabled
+    || isPendingApproval
+    || workActionsDisabled
+    || openAgentConversation.isPending
+    || !resolvedCompanyId;
   const assignAndRunDisabled = disabled || isPendingApproval || workActionsDisabled;
   const pauseResumeDisabled = disabled || isPendingApproval || (isPaused && workActionsDisabled);
   const clearErrorDisabled = disabled;
@@ -306,6 +346,22 @@ export function AgentActionButtons({
         <Plus className="h-3.5 w-3.5 sm:mr-1" />
         <span className="hidden sm:inline">{assignLabel}</span>
       </Button>
+      {showTalkButton ? (
+        <Button
+          variant="outline"
+          size={size}
+          onClick={() => openAgentConversation.mutate()}
+          disabled={talkDisabled}
+          title={workActionsDisabled ? workActionsDisabledReason : "Open conversation issue"}
+        >
+          {openAgentConversation.isPending ? (
+            <Loader2 className="h-3.5 w-3.5 animate-spin sm:mr-1" />
+          ) : (
+            <MessageSquare className="h-3.5 w-3.5 sm:mr-1" />
+          )}
+          <span className="hidden sm:inline">Talk to agent</span>
+        </Button>
+      ) : null}
       <RunButton
         onClick={() => agentAction.mutate("invoke")}
         disabled={assignAndRunDisabled}
