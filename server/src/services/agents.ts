@@ -9,6 +9,7 @@ import {
   agentTaskSessions,
   agentWakeupRequests,
   activityLog,
+  assets,
   costEvents,
   heartbeatRunEvents,
   heartbeatRuns,
@@ -238,11 +239,20 @@ export function agentService(db: Db) {
     };
   }
 
+  function enrichAgentAvatar<T extends { avatarAssetId?: string | null }>(row: T) {
+    const avatarAssetId = row.avatarAssetId ?? null;
+    return {
+      ...row,
+      avatarAssetId,
+      avatarUrl: avatarAssetId ? `/api/assets/${avatarAssetId}/content` : null,
+    };
+  }
+
   function normalizeAgentBaseRow(row: typeof agents.$inferSelect) {
-    return withUrlKey({
+    return enrichAgentAvatar(withUrlKey({
       ...row,
       permissions: normalizeAgentPermissions(row.permissions, row.role),
-    });
+    }));
   }
 
   function toEligibilityAgent(row: Pick<typeof agents.$inferSelect, "id" | "companyId" | "name" | "status" | "reportsTo">): AgentEligibilityAgent {
@@ -423,10 +433,27 @@ export function agentService(db: Db) {
       }
     }
 
-    const normalizedPatch = { ...data } as Partial<typeof agents.$inferInsert>;
+    const normalizedPatch = { ...data } as Partial<typeof agents.$inferInsert> & { avatarAssetId?: string | null };
     if (data.permissions !== undefined) {
       const role = (data.role ?? existing.role) as string;
       normalizedPatch.permissions = normalizeAgentPermissions(data.permissions, role);
+    }
+
+    const previousAvatarAssetId = existing.avatarAssetId ?? null;
+    if (Object.prototype.hasOwnProperty.call(data, "avatarAssetId")) {
+      const nextAvatarAssetId = data.avatarAssetId ?? null;
+      if (nextAvatarAssetId !== null) {
+        const nextAvatarAsset = await db
+          .select({ id: assets.id, companyId: assets.companyId })
+          .from(assets)
+          .where(eq(assets.id, nextAvatarAssetId))
+          .then((rows) => rows[0] ?? null);
+        if (!nextAvatarAsset) throw notFound("Avatar asset not found");
+        if (nextAvatarAsset.companyId !== existing.companyId) {
+          throw unprocessable("Avatar asset must belong to the same company");
+        }
+      }
+      normalizedPatch.avatarAssetId = nextAvatarAssetId;
     }
 
     const shouldRecordRevision = Boolean(options?.recordRevision) && hasConfigPatchFields(normalizedPatch);
@@ -441,6 +468,14 @@ export function agentService(db: Db) {
         .returning()
         .then((rows) => rows[0] ?? null);
       if (!updated) return null;
+
+      if (
+        Object.prototype.hasOwnProperty.call(data, "avatarAssetId")
+        && previousAvatarAssetId
+        && previousAvatarAssetId !== (data.avatarAssetId ?? null)
+      ) {
+        await tx.delete(assets).where(eq(assets.id, previousAvatarAssetId));
+      }
 
       if (Object.prototype.hasOwnProperty.call(normalizedPatch, "adapterConfig")) {
         await syncAgentSecretBindings(updated, txDb);

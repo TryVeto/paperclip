@@ -78,7 +78,7 @@ import {
 import { Collapsible, CollapsibleTrigger, CollapsibleContent } from "@/components/ui/collapsible";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import { Input } from "@/components/ui/input";
-import { AgentIcon, AgentIconPicker } from "../components/AgentIconPicker";
+import { AgentAvatar, AgentIconPicker } from "../components/AgentIconPicker";
 import { RunTranscriptView, type TranscriptMode } from "../components/transcript/RunTranscriptView";
 import {
   isUuidLike,
@@ -846,6 +846,32 @@ export function AgentDetail() {
     },
   });
 
+  const updateAvatar = useMutation({
+    mutationFn: async (file: File) => {
+      if (!resolvedCompanyId) throw new Error("Company is required to upload an avatar");
+      const asset = await assetsApi.uploadImage(resolvedCompanyId, file, "agent-avatars");
+      return agentsApi.update(agentLookupRef, { avatarAssetId: asset.assetId }, resolvedCompanyId);
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(routeAgentRef) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentLookupRef) });
+      if (resolvedCompanyId) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(resolvedCompanyId) });
+      }
+    },
+  });
+
+  const clearAvatar = useMutation({
+    mutationFn: () => agentsApi.update(agentLookupRef, { avatarAssetId: null }, resolvedCompanyId ?? undefined),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(routeAgentRef) });
+      queryClient.invalidateQueries({ queryKey: queryKeys.agents.detail(agentLookupRef) });
+      if (resolvedCompanyId) {
+        queryClient.invalidateQueries({ queryKey: queryKeys.agents.list(resolvedCompanyId) });
+      }
+    },
+  });
+
   const updatePermissions = useMutation({
     mutationFn: (permissions: AgentPermissionUpdate) =>
       agentsApi.updatePermissions(agentLookupRef, permissions, resolvedCompanyId ?? undefined),
@@ -992,9 +1018,28 @@ export function AgentDetail() {
           <AgentIconPicker
             value={agent.icon}
             onChange={(icon) => updateIcon.mutate(icon)}
+            avatarUrl={agent.avatarUrl}
+            agentName={agent.name}
+            onUploadAvatar={(file) => updateAvatar.mutate(file)}
+            onClearAvatar={() => clearAvatar.mutate()}
+            avatarUploadPending={updateAvatar.isPending || clearAvatar.isPending}
           >
-            <button className="shrink-0 flex items-center justify-center h-12 w-12 rounded-lg bg-accent hover:bg-accent/80 transition-colors">
-              <AgentIcon icon={agent.icon} className="h-6 w-6" />
+            <button
+              type="button"
+              className="flex h-12 w-12 shrink-0 items-center justify-center overflow-hidden rounded-lg bg-accent transition-colors hover:bg-accent/80"
+              aria-label="Change agent icon or profile photo"
+            >
+              {agent.avatarUrl ? (
+                <AgentAvatar
+                  name={agent.name}
+                  icon={agent.icon}
+                  avatarUrl={agent.avatarUrl}
+                  className="h-12 w-12"
+                  imageClassName="h-12 w-12"
+                />
+              ) : (
+                <AgentAvatar name={agent.name} icon={agent.icon} className="h-6 w-6" />
+              )}
             </button>
           </AgentIconPicker>
           <div className="min-w-0">

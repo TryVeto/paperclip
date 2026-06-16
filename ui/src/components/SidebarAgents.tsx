@@ -32,7 +32,7 @@ import {
   type AgentSidebarSortMode,
   writeAgentSortMode,
 } from "../lib/agent-order";
-import { AgentIcon } from "./AgentIconPicker";
+import { AgentAvatar, AgentIconPicker } from "./AgentIconPicker";
 import { BudgetSidebarMarker } from "./BudgetSidebarMarker";
 import { SidebarSection, type SidebarSectionRadioChoice } from "./SidebarSection";
 import { Button } from "@/components/ui/button";
@@ -143,7 +143,12 @@ function SidebarAgentItem({
           : "text-foreground/80 hover:bg-accent/50 hover:text-foreground"
       )}
     >
-      <AgentIcon icon={agent.icon} className="shrink-0 h-3.5 w-3.5 text-muted-foreground" />
+      <AgentAvatar
+        name={agent.name}
+        icon={agent.icon}
+        avatarUrl={agent.avatarUrl}
+        className="h-3.5 w-3.5 shrink-0 text-muted-foreground"
+      />
       <span className={rail ? SIDEBAR_RAIL_HIDDEN_LABEL : "flex-1 truncate"}>{agent.name}</span>
       {!rail && hasInvalidOrgChain ? (
         <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-500" aria-label="Invalid reporting chain" />

@@ -137,6 +137,7 @@ export interface CompanyPortabilityAgentManifestEntry {
   role: string;
   title: string | null;
   icon: string | null;
+  avatarPath?: string | null;
   capabilities: string | null;
   reportsToSlug: string | null;
   reportsToExistingAgentId: string | null;

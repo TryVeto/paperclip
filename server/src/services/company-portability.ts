@@ -661,6 +661,7 @@ const COMPANY_LOGO_CONTENT_TYPE_EXTENSIONS: Record<string, string> = {
 };
 
 const COMPANY_LOGO_FILE_NAME = "company-logo";
+const AGENT_AVATAR_CONTENT_TYPE_EXTENSIONS = COMPANY_LOGO_CONTENT_TYPE_EXTENSIONS;
 
 const RUNTIME_DEFAULT_RULES: Array<{ path: string[]; value: unknown }> = [
   { path: ["heartbeat", "cooldownSec"], value: 10 },
@@ -1533,6 +1534,63 @@ function resolveCompanyLogoExtension(contentType: string | null | undefined, ori
 
   const extension = originalFilename ? path.extname(originalFilename).toLowerCase() : "";
   return extension || ".png";
+}
+
+async function importPortableAgentAvatar(params: {
+  avatarPath: string | null | undefined;
+  files: Record<string, CompanyPortabilityFileEntry>;
+  agentId: string;
+  companyId: string;
+  actorUserId: string | null | undefined;
+  assetRecords: ReturnType<typeof assetService>;
+  storage: StorageService | null;
+  agents: ReturnType<typeof agentService>;
+  warnings: string[];
+}) {
+  const avatarPath = params.avatarPath ?? null;
+  if (!avatarPath) return;
+
+  const avatarFile = params.files[avatarPath];
+  if (!avatarFile) {
+    params.warnings.push(`Skipped agent avatar import because ${avatarPath} is missing from the package.`);
+    return;
+  }
+  if (!params.storage) {
+    params.warnings.push("Skipped agent avatar import because storage is unavailable.");
+    return;
+  }
+
+  const contentType = isPortableBinaryFile(avatarFile)
+    ? (avatarFile.contentType ?? inferContentTypeFromPath(avatarPath))
+    : inferContentTypeFromPath(avatarPath);
+  if (!contentType || !AGENT_AVATAR_CONTENT_TYPE_EXTENSIONS[contentType]) {
+    params.warnings.push(`Skipped agent avatar import for ${avatarPath} because the file type is unsupported.`);
+    return;
+  }
+
+  try {
+    const body = portableFileToBuffer(avatarFile, avatarPath);
+    const stored = await params.storage.putFile({
+      companyId: params.companyId,
+      namespace: "assets/agents",
+      originalFilename: path.posix.basename(avatarPath),
+      contentType,
+      body,
+    });
+    const createdAsset = await params.assetRecords.create(params.companyId, {
+      provider: stored.provider,
+      objectKey: stored.objectKey,
+      contentType: stored.contentType,
+      byteSize: stored.byteSize,
+      sha256: stored.sha256,
+      originalFilename: stored.originalFilename,
+      createdByAgentId: null,
+      createdByUserId: params.actorUserId ?? null,
+    });
+    await params.agents.update(params.agentId, { avatarAssetId: createdAsset.id });
+  } catch (err) {
+    params.warnings.push(`Failed to import agent avatar ${avatarPath}: ${err instanceof Error ? err.message : String(err)}`);
+  }
 }
 
 function portableBinaryFileToBuffer(entry: Extract<CompanyPortabilityFileEntry, { encoding: "base64" }>) {
@@ -2705,6 +2763,7 @@ function buildManifestFromPackageFiles(
       role: asString(extension.role) ?? asString(frontmatter.role) ?? "agent",
       title,
       icon: asString(extension.icon),
+      avatarPath: asString(extension.avatarPath),
       capabilities: asString(extension.capabilities),
       reportsToSlug: asString(frontmatter.reportsTo) ?? asString(extension.reportsTo),
       reportsToExistingAgentId: asString(extension.reportsToExistingAgentId),
@@ -3583,9 +3642,32 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
           }
         }
 
+        let avatarPath: string | null = null;
+        const avatarAssetId = (agent as { avatarAssetId?: string | null }).avatarAssetId ?? null;
+        if (avatarAssetId) {
+          if (!storage) {
+            warnings.push(`Skipped avatar export for agent ${slug} because storage is unavailable.`);
+          } else {
+            const avatarAsset = await assetRecords.getById(avatarAssetId);
+            if (!avatarAsset) {
+              warnings.push(`Skipped avatar export for agent ${slug} because asset ${avatarAssetId} was not found.`);
+            } else {
+              try {
+                const object = await storage.getObject(company.id, avatarAsset.objectKey);
+                const body = await streamToBuffer(object.stream);
+                avatarPath = `images/agents/${slug}-avatar${resolveCompanyLogoExtension(avatarAsset.contentType, avatarAsset.originalFilename)}`;
+                files[avatarPath] = bufferToPortableBinaryFile(body, avatarAsset.contentType);
+              } catch (err) {
+                warnings.push(`Failed to export avatar for agent ${slug}: ${err instanceof Error ? err.message : String(err)}`);
+              }
+            }
+          }
+        }
+
         const extension = stripEmptyValues({
           role: agent.role !== "agent" ? agent.role : undefined,
           icon: agent.icon ?? null,
+          avatarPath,
           capabilities: agent.capabilities ?? null,
           adapter: {
             type: agent.adapterType,
@@ -4599,6 +4681,17 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
               { targetType: "agent", targetId: updated.id },
               isPlainRecord(updated.adapterConfig) ? updated.adapterConfig.env : undefined,
             );
+            await importPortableAgentAvatar({
+              avatarPath: manifestAgent.avatarPath,
+              files: plan.source.files,
+              agentId: updated.id,
+              companyId: targetCompany.id,
+              actorUserId,
+              assetRecords,
+              storage: storage ?? null,
+              agents,
+              warnings,
+            });
             importedSlugToAgentId.set(planAgent.slug, updated.id);
             existingSlugToAgentId.set(normalizeAgentUrlKey(updated.name) ?? updated.id, updated.id);
             resultAgents.push({
@@ -4640,6 +4733,17 @@ export function companyPortabilityService(db: Db, storage?: StorageService) {
             { targetType: "agent", targetId: created.id },
             isPlainRecord(created.adapterConfig) ? created.adapterConfig.env : undefined,
           );
+          await importPortableAgentAvatar({
+            avatarPath: manifestAgent.avatarPath,
+            files: plan.source.files,
+            agentId: created.id,
+            companyId: targetCompany.id,
+            actorUserId,
+            assetRecords,
+            storage: storage ?? null,
+            agents,
+            warnings,
+          });
           importedSlugToAgentId.set(planAgent.slug, created.id);
           existingSlugToAgentId.set(normalizeAgentUrlKey(created.name) ?? created.id, created.id);
           resultAgents.push({
