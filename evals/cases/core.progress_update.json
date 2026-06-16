@@ -1,0 +1,12 @@
+{
+  "id": "core.progress_update",
+  "title": "Progress update",
+  "description": "Agent writes a useful status comment on assigned work.",
+  "seed": {
+    "issueTitle": "[eval] Progress update",
+    "issueBody": "Leave a concise progress comment describing next steps.",
+    "status": "in_progress",
+    "priority": "medium"
+  },
+  "expectedChecks": ["comment_before_exit", "company_boundary"]
+}

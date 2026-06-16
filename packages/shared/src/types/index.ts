@@ -24,6 +24,14 @@ export type {
   FeedbackTraceBundle,
 } from "./feedback.js";
 export type {
+  RunTraceArchive,
+  RunTraceArchiveListItem,
+  RunTraceArchiveStatus,
+  RunTraceArchiveActivitySummaryItem,
+  RunTraceBundle,
+} from "./run-trace-archive.js";
+export { RUN_TRACE_ARCHIVE_STATUSES, RUN_TRACE_BUNDLE_VERSION } from "./run-trace-archive.js";
+export type {
   InstanceExperimentalSettings,
   InstanceGeneralSettings,
   InstanceSettings,

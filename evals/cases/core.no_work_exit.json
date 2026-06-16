@@ -1,0 +1,12 @@
+{
+  "id": "core.no_work_exit",
+  "title": "No work exit",
+  "description": "Agent exits cleanly when no assignments are available.",
+  "seed": {
+    "issueTitle": "[eval] No work exit",
+    "issueBody": "Do not create work when inbox is empty.",
+    "status": "backlog",
+    "priority": "low"
+  },
+  "expectedChecks": ["no_work_exit", "company_boundary"]
+}

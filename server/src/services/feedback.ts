@@ -17,6 +17,7 @@ import {
   issueComments,
   issueDocuments,
   issues,
+  activityLog,
 } from "@paperclipai/db";
 import { readPaperclipSkillSyncPreference } from "@paperclipai/adapter-utils/server-utils";
 import { claudeConfigDir, parseClaudeStreamJson } from "@paperclipai/adapter-claude-local/server";
@@ -34,6 +35,7 @@ import {
   type FeedbackTraceStatus,
   type FeedbackTraceTargetSummary,
   type FeedbackVoteValue,
+  RUN_TRACE_BUNDLE_VERSION,
 } from "@paperclipai/shared";
 import { resolveHomeAwarePath, resolvePaperclipInstanceRoot } from "../home-paths.js";
 import { notFound, unprocessable } from "../errors.js";
@@ -1697,6 +1699,252 @@ async function buildFeedbackTraceBundleFromRow(
   };
 
   return bundle;
+}
+
+export async function buildRunTraceBundleForRunId(
+  db: Db,
+  input: { companyId: string; runId: string },
+): Promise<FeedbackTraceBundle | null> {
+  const run = await db
+    .select({
+      id: heartbeatRuns.id,
+      companyId: heartbeatRuns.companyId,
+      agentId: heartbeatRuns.agentId,
+      invocationSource: heartbeatRuns.invocationSource,
+      status: heartbeatRuns.status,
+      startedAt: heartbeatRuns.startedAt,
+      finishedAt: heartbeatRuns.finishedAt,
+      createdAt: heartbeatRuns.createdAt,
+      updatedAt: heartbeatRuns.updatedAt,
+      error: heartbeatRuns.error,
+      errorCode: heartbeatRuns.errorCode,
+      usageJson: heartbeatRuns.usageJson,
+      resultJson: heartbeatRuns.resultJson,
+      sessionIdBefore: heartbeatRuns.sessionIdBefore,
+      sessionIdAfter: heartbeatRuns.sessionIdAfter,
+      externalRunId: heartbeatRuns.externalRunId,
+      contextSnapshot: heartbeatRuns.contextSnapshot,
+      logStore: heartbeatRuns.logStore,
+      logRef: heartbeatRuns.logRef,
+      logBytes: heartbeatRuns.logBytes,
+      logSha256: heartbeatRuns.logSha256,
+      agentName: agents.name,
+      agentRole: agents.role,
+      agentTitle: agents.title,
+      adapterType: agents.adapterType,
+    })
+    .from(heartbeatRuns)
+    .innerJoin(agents, eq(heartbeatRuns.agentId, agents.id))
+    .where(and(eq(heartbeatRuns.id, input.runId), eq(heartbeatRuns.companyId, input.companyId)))
+    .then((rows) => rows[0] ?? null);
+
+  if (!run) return null;
+
+  const notes: string[] = [];
+  const state = createFeedbackRedactionState();
+  const files: FeedbackTraceBundleFile[] = [];
+  let rawAdapterTrace: Record<string, unknown> | null = null;
+  let normalizedAdapterTrace: Record<string, unknown> | null = null;
+
+  const contextSnapshot = asRecord(run.contextSnapshot);
+  const contextIssueId = asString(contextSnapshot?.issueId);
+  let issueIdentifier: string | null = null;
+  let issueTitle: string | null = null;
+  if (contextIssueId) {
+    const issue = await db
+      .select({ identifier: issues.identifier, title: issues.title })
+      .from(issues)
+      .where(and(eq(issues.id, contextIssueId), eq(issues.companyId, input.companyId)))
+      .then((rows) => rows[0] ?? null);
+    issueIdentifier = issue?.identifier ?? null;
+    issueTitle = issue?.title ?? null;
+  }
+
+  const events = await db
+    .select()
+    .from(heartbeatRunEvents)
+    .where(eq(heartbeatRunEvents.runId, run.id))
+    .orderBy(asc(heartbeatRunEvents.seq));
+  const logText = await readFullRunLog(run);
+  const logEntries = parseRunLogEntries(logText);
+  const stdoutText = logEntries
+    .filter((entry) => entry.stream === "stdout")
+    .map((entry) => entry.chunk)
+    .join("");
+
+  const paperclipRun = sanitizeFeedbackValue(
+    {
+      id: run.id,
+      companyId: run.companyId,
+      agentId: run.agentId,
+      agentName: run.agentName,
+      agentRole: run.agentRole,
+      agentTitle: run.agentTitle,
+      adapterType: run.adapterType,
+      invocationSource: run.invocationSource,
+      status: run.status,
+      startedAt: run.startedAt?.toISOString() ?? null,
+      finishedAt: run.finishedAt?.toISOString() ?? null,
+      createdAt: run.createdAt.toISOString(),
+      updatedAt: run.updatedAt.toISOString(),
+      error: run.error,
+      errorCode: run.errorCode,
+      usage: asRecord(run.usageJson),
+      result: asRecord(run.resultJson),
+      sessionIdBefore: run.sessionIdBefore,
+      sessionIdAfter: run.sessionIdAfter,
+      externalRunId: run.externalRunId,
+      contextSnapshot,
+      logStore: run.logStore,
+      logRef: run.logRef,
+      logBytes: run.logBytes,
+      logSha256: run.logSha256,
+      eventCount: events.length,
+    },
+    state,
+    "bundle.paperclipRun",
+    MAX_TRACE_FILE_CHARS,
+  ) as Record<string, unknown>;
+
+  files.push(makeBundleFile({
+    path: "paperclip/run.json",
+    contentType: "application/json",
+    source: "paperclip_run",
+    contents: `${JSON.stringify(paperclipRun, null, 2)}\n`,
+  }));
+
+  const sanitizedEvents = sanitizeFeedbackValue(
+    events,
+    state,
+    "bundle.paperclipRun.events",
+    MAX_TRACE_FILE_CHARS,
+  );
+  files.push(makeBundleFile({
+    path: "paperclip/run-events.json",
+    contentType: "application/json",
+    source: "paperclip_run_events",
+    contents: `${JSON.stringify(sanitizedEvents, null, 2)}\n`,
+  }));
+
+  if (logText) {
+    files.push(makeBundleFile({
+      path: "paperclip/run-log.ndjson",
+      contentType: "application/x-ndjson",
+      source: "paperclip_run_log",
+      contents: `${sanitizeFeedbackText(logText, state, "bundle.paperclipRun.log", MAX_TRACE_FILE_CHARS)}\n`,
+    }));
+  } else {
+    appendNote(notes, "run_log_missing");
+  }
+
+  const activityRows = await db
+    .select()
+    .from(activityLog)
+    .where(and(eq(activityLog.companyId, input.companyId), eq(activityLog.runId, run.id)))
+    .orderBy(asc(activityLog.createdAt));
+  if (activityRows.length > 0) {
+    const sanitizedActivity = sanitizeFeedbackValue(
+      activityRows,
+      state,
+      "bundle.paperclipRun.activity",
+      MAX_TRACE_FILE_CHARS,
+    );
+    files.push(makeBundleFile({
+      path: "paperclip/activity-log.json",
+      contentType: "application/json",
+      source: "paperclip_run",
+      contents: `${JSON.stringify(sanitizedActivity, null, 2)}\n`,
+    }));
+  }
+
+  if (run.adapterType === "codex_local") {
+    const adapter = await buildCodexTraceFiles({
+      companyId: input.companyId,
+      sessionId: run.sessionIdAfter ?? run.sessionIdBefore,
+      state,
+      notes,
+    });
+    files.push(...adapter.files);
+    rawAdapterTrace = adapter.raw;
+    normalizedAdapterTrace = adapter.normalized;
+  } else if (run.adapterType === "claude_local") {
+    const adapter = await buildClaudeTraceFiles({
+      sessionId: run.sessionIdAfter ?? run.sessionIdBefore,
+      stdoutText,
+      state,
+      notes,
+    });
+    files.push(...adapter.files);
+    rawAdapterTrace = adapter.raw;
+    normalizedAdapterTrace = adapter.normalized;
+  } else if (run.adapterType === "opencode_local") {
+    const adapter = await buildOpenCodeTraceFiles({
+      sessionId: run.sessionIdAfter ?? run.sessionIdBefore,
+      stdoutText,
+      state,
+      notes,
+    });
+    files.push(...adapter.files);
+    rawAdapterTrace = adapter.raw;
+    normalizedAdapterTrace = adapter.normalized;
+  } else {
+    appendNote(notes, "adapter_specific_trace_not_supported");
+  }
+
+  const privacy = {
+    bundleRedactionSummary: finalizeFeedbackRedactionSummary(state),
+  };
+  const captureStatus = captureStatusFromFiles(files);
+  if (captureStatus !== "full" && files.length > 0) {
+    appendNote(notes, "adapter_trace_partial");
+  }
+
+  const envelope = sanitizeFeedbackValue(
+    {
+      runId: run.id,
+      companyId: run.companyId,
+      agentId: run.agentId,
+      issueId: contextIssueId,
+      issueIdentifier,
+      issueTitle,
+      bundleVersion: RUN_TRACE_BUNDLE_VERSION,
+      runStatus: run.status,
+      createdAt: run.createdAt.toISOString(),
+      finishedAt: run.finishedAt?.toISOString() ?? null,
+    },
+    state,
+    "bundle.envelope",
+    MAX_TRACE_FILE_CHARS,
+  ) as Record<string, unknown>;
+
+  return {
+    traceId: run.id,
+    exportId: null,
+    companyId: run.companyId,
+    issueId: contextIssueId ?? "",
+    issueIdentifier,
+    adapterType: run.adapterType,
+    captureStatus,
+    notes,
+    envelope,
+    surface: null,
+    paperclipRun,
+    rawAdapterTrace,
+    normalizedAdapterTrace,
+    privacy,
+    integrity: {
+      bundleDigest: sha256Digest({
+        runId: run.id,
+        files: files.map((file) => ({
+          path: file.path,
+          source: file.source,
+          sha256: file.sha256,
+        })),
+        captureStatus,
+      }),
+    },
+    files,
+  };
 }
 
 export function feedbackService(db: Db, options: FeedbackServiceOptions = {}) {

@@ -832,6 +832,19 @@ export {
 } from "./types/feedback.js";
 
 export {
+  RUN_TRACE_ARCHIVE_STATUSES,
+  RUN_TRACE_BUNDLE_VERSION,
+} from "./types/run-trace-archive.js";
+
+export type {
+  RunTraceArchive,
+  RunTraceArchiveListItem,
+  RunTraceArchiveStatus,
+  RunTraceArchiveActivitySummaryItem,
+  RunTraceBundle,
+} from "./types/run-trace-archive.js";
+
+export {
   DAILY_RETENTION_PRESETS,
   WEEKLY_RETENTION_PRESETS,
   MONTHLY_RETENTION_PRESETS,
@@ -888,10 +901,13 @@ export {
   feedbackTraceStatusSchema,
   feedbackVoteValueSchema,
   upsertIssueFeedbackVoteSchema,
+  listRunTraceArchivesQuerySchema,
+  runTraceArchiveStatusSchema,
   type CreateCompany,
   type UpdateCompany,
   type UpdateCompanyBranding,
   type UpsertIssueFeedbackVote,
+  type ListRunTraceArchivesQuery,
   environmentDriverSchema,
   environmentStatusSchema,
   environmentLeaseStatusSchema,

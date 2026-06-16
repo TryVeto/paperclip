@@ -47,6 +47,11 @@ export {
   type UpsertIssueFeedbackVote,
 } from "./feedback.js";
 export {
+  listRunTraceArchivesQuerySchema,
+  runTraceArchiveStatusSchema,
+  type ListRunTraceArchivesQuery,
+} from "./run-trace-archive.js";
+export {
   sidebarOrderPreferenceSchema,
   upsertSidebarOrderPreferenceSchema,
   type UpsertSidebarOrderPreference,

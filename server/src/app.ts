@@ -30,6 +30,7 @@ import { userProfileRoutes } from "./routes/user-profiles.js";
 import { sidebarBadgeRoutes } from "./routes/sidebar-badges.js";
 import { sidebarPreferenceRoutes } from "./routes/sidebar-preferences.js";
 import { resourceMembershipRoutes } from "./routes/resource-memberships.js";
+import { runTraceArchiveRoutes } from "./routes/run-trace-archives.js";
 import { inboxDismissalRoutes } from "./routes/inbox-dismissals.js";
 import { instanceSettingsRoutes } from "./routes/instance-settings.js";
 import { openApiRoutes } from "./routes/openapi.js";
@@ -68,6 +69,7 @@ import { COMPANY_IMPORT_API_PATH } from "./routes/company-import-paths.js";
 
 type UiMode = "none" | "static" | "vite-dev";
 const FEEDBACK_EXPORT_FLUSH_INTERVAL_MS = 5_000;
+const RUN_TRACE_ARCHIVE_FLUSH_INTERVAL_MS = 15_000;
 const VITE_DEV_ASSET_PREFIXES = [
   "/@fs/",
   "/@id/",
@@ -135,6 +137,13 @@ export async function createApp(
         traceId?: string;
         limit?: number;
         now?: Date;
+      }): Promise<unknown>;
+    };
+    runTraceArchiveService?: {
+      flushPendingArchives(input?: {
+        companyId?: string;
+        archiveId?: string;
+        limit?: number;
       }): Promise<unknown>;
     };
     databaseBackupService?: InstanceDatabaseBackupService;
@@ -230,6 +239,7 @@ export async function createApp(
   api.use(secretRoutes(db));
   api.use(costRoutes(db, { pluginWorkerManager: workerManager }));
   api.use(activityRoutes(db));
+  api.use(runTraceArchiveRoutes(db));
   api.use(dashboardRoutes(db));
   api.use(userProfileRoutes(db));
   api.use(sidebarBadgeRoutes(db));
@@ -462,6 +472,39 @@ export async function createApp(
   if (opts.feedbackExportService) {
     void flushPendingFeedbackExports();
   }
+
+  let runTraceArchiveShuttingDown = false;
+  let runTraceArchiveTimer: ReturnType<typeof setInterval> | null = null;
+  const disableRunTraceArchiveFlushes = () => {
+    runTraceArchiveShuttingDown = true;
+    if (runTraceArchiveTimer) {
+      clearInterval(runTraceArchiveTimer);
+      runTraceArchiveTimer = null;
+    }
+  };
+  const flushPendingRunTraceArchives = async () => {
+    if (runTraceArchiveShuttingDown) return;
+    try {
+      await opts.runTraceArchiveService?.flushPendingArchives();
+    } catch (err) {
+      if (isDatabaseConnectionUnavailableError(err)) {
+        disableRunTraceArchiveFlushes();
+        logger.warn({ err }, "Disabling pending run trace archive flushes because the database is unavailable");
+        return;
+      }
+      logger.error({ err }, "Failed to flush pending run trace archives");
+    }
+  };
+
+  runTraceArchiveTimer = opts.runTraceArchiveService
+    ? setInterval(() => {
+      void flushPendingRunTraceArchives();
+    }, RUN_TRACE_ARCHIVE_FLUSH_INTERVAL_MS)
+    : null;
+  runTraceArchiveTimer?.unref?.();
+  if (opts.runTraceArchiveService) {
+    void flushPendingRunTraceArchives();
+  }
   void toolDispatcher.initialize().catch((err) => {
     logger.error({ err }, "Failed to initialize plugin tool dispatcher");
   });
@@ -484,6 +527,7 @@ export async function createApp(
     if (appServicesShutdown) return;
     appServicesShutdown = true;
     disableFeedbackExportFlushes();
+    disableRunTraceArchiveFlushes();
     devWatcher?.close();
     viteHtmlRenderer?.dispose();
     hostServiceCleanup.disposeAll();

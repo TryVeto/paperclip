@@ -1,0 +1,9 @@
+{
+  "bundles": [
+    {
+      "id": "frontline-eng-default",
+      "label": "frontline-eng default config",
+      "agentName": "frontline-eng"
+    }
+  ]
+}

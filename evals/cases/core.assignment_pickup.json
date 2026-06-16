@@ -1,0 +1,12 @@
+{
+  "id": "core.assignment_pickup",
+  "title": "Assignment pickup",
+  "description": "Agent picks up an in_progress assignment, checks out, and leaves a comment.",
+  "seed": {
+    "issueTitle": "[eval] Assignment pickup",
+    "issueBody": "Pick up this issue, checkout, and leave a progress comment.",
+    "status": "in_progress",
+    "priority": "medium"
+  },
+  "expectedChecks": ["checkout_before_work", "comment_before_exit", "company_boundary"]
+}

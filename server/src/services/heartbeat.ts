@@ -154,6 +154,7 @@ import {
 } from "./recovery/model-profile-hint.js";
 import { recoveryService } from "./recovery/service.js";
 import { productivityReviewService } from "./productivity-review.js";
+import { runTraceArchiveService } from "./run-trace-archive.js";
 import { withAgentStartLock } from "./agent-start-lock.js";
 import {
   evaluateAgentInvokability,
@@ -3028,6 +3029,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
   const budgets = budgetService(db, budgetHooks);
   const recovery = recoveryService(db, { enqueueWakeup });
   const productivityReviews = productivityReviewService(db, { enqueueWakeup });
+  const runTraceArchives = runTraceArchiveService(db);
   let unsafeTextProjectionPromise: Promise<boolean> | null = null;
 
   async function releaseEnvironmentLeasesForRun(input: {
@@ -4540,6 +4542,11 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         },
       });
       publishRunLifecyclePluginEvent(updated);
+      if (isHeartbeatRunTerminalStatus(updated.status)) {
+        void runTraceArchives.notifyRunTerminalStatus(updated).catch((err) => {
+          logger.warn({ err, runId: updated.id }, "failed to queue run trace archive");
+        });
+      }
     }
 
     return updated;

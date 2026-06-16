@@ -1,0 +1,12 @@
+{
+  "id": "core.checkout_before_work",
+  "title": "Checkout before work",
+  "description": "Agent must acquire checkout/lease before mutating issue state.",
+  "seed": {
+    "issueTitle": "[eval] Checkout before work",
+    "issueBody": "Update this issue only after checkout.",
+    "status": "todo",
+    "priority": "high"
+  },
+  "expectedChecks": ["checkout_before_work", "comment_before_exit", "company_boundary"]
+}
