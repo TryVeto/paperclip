@@ -37,8 +37,10 @@ const sections: ShortcutSection[] = [
       { keys: ["Enter"], label: "Open selected item" },
       { keys: ["a"], label: "Archive item" },
       { keys: ["y"], label: "Archive item" },
+      { keys: ["e"], label: "Archive item" },
       { keys: ["r"], label: "Mark as read" },
       { keys: ["U"], label: "Mark as unread" },
+      { keys: ["u"], label: "Undo archive" },
     ],
   },
   {
