@@ -159,14 +159,14 @@ function touchCenter(a: React.Touch, b: React.Touch, container: HTMLDivElement):
 import { getAdapterLabel } from "../adapters/adapter-display-registry";
 
 const statusDotColor: Record<string, string> = {
-  running: "#22d3ee",
-  active: "#4ade80",
-  paused: "#facc15",
-  idle: "#facc15",
-  error: "#f87171",
-  terminated: "#a3a3a3",
+  running: "var(--color-cyan-500)",
+  active: "var(--color-emerald-500)",
+  paused: "var(--color-amber-500)",
+  idle: "var(--color-amber-500)",
+  error: "var(--color-red-500)",
+  terminated: "var(--color-neutral-400)",
 };
-const defaultDotColor = "#a3a3a3";
+const defaultDotColor = "var(--color-neutral-400)";
 
 // ── Main component ──────────────────────────────────────────────────────
 
@@ -565,7 +565,7 @@ export function OrgChart() {
               <div
                 key={node.id}
                 data-org-card
-                className="absolute bg-card border border-border rounded-lg shadow-sm hover:shadow-md hover:border-foreground/20 transition-[box-shadow,border-color] duration-150 cursor-pointer select-none"
+                className="absolute bg-card border border-border rounded-lg shadow-sm hover:border-foreground/20 transition-[border-color] duration-150 cursor-pointer select-none"
                 style={{
                   left: node.x,
                   top: node.y,
