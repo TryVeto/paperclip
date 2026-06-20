@@ -3,6 +3,7 @@ import { existsSync, readFileSync, statSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { createRequire } from "node:module";
 import type {
   CatalogSkill,
   CatalogSkillFileDetail,
@@ -21,8 +22,46 @@ interface CatalogManifestFile {
 
 const serviceDir = path.dirname(fileURLToPath(import.meta.url));
 const repoRoot = path.resolve(serviceDir, "../../..");
-const catalogPackageRoot = path.join(repoRoot, "packages/skills-catalog");
-const catalogManifestPath = path.join(catalogPackageRoot, "generated/catalog.json");
+
+// The skills-catalog package and its generated manifest live in different
+// places depending on how the server is built and deployed:
+//   - monorepo / source layout: <repo>/packages/skills-catalog/generated/catalog.json
+//   - published / Docker layout: .../node_modules/@paperclipai/skills-catalog/(dist/)generated/catalog.json
+// Resolving a single hardcoded monorepo path makes GET /api/skills/catalog 500
+// in deployments that don't preserve the workspace tree, so probe known layouts.
+function resolveCatalogPaths(): { packageRoot: string; manifestPath: string } {
+  const candidateRoots: string[] = [path.join(repoRoot, "packages/skills-catalog")];
+  for (const base of [repoRoot, path.resolve(serviceDir, ".."), serviceDir]) {
+    candidateRoots.push(path.join(base, "node_modules/@paperclipai/skills-catalog"));
+  }
+  try {
+    // Honors the package "exports" map in whatever layout is installed.
+    const resolved = createRequire(import.meta.url).resolve(
+      "@paperclipai/skills-catalog/catalog.json",
+    );
+    const root = resolved.includes(`${path.sep}dist${path.sep}`)
+      ? path.resolve(path.dirname(resolved), "../..")
+      : path.resolve(path.dirname(resolved), "..");
+    candidateRoots.unshift(root);
+  } catch {
+    // Package not resolvable here; fall back to filesystem probing below.
+  }
+  for (const packageRoot of candidateRoots) {
+    for (const rel of ["dist/generated/catalog.json", "generated/catalog.json"]) {
+      const manifestPath = path.join(packageRoot, rel);
+      if (existsSync(manifestPath)) return { packageRoot, manifestPath };
+    }
+  }
+  // Nothing found: keep the monorepo default so the thrown error stays actionable.
+  const fallbackRoot = path.join(repoRoot, "packages/skills-catalog");
+  return {
+    packageRoot: fallbackRoot,
+    manifestPath: path.join(fallbackRoot, "generated/catalog.json"),
+  };
+}
+
+const { packageRoot: catalogPackageRoot, manifestPath: catalogManifestPath } =
+  resolveCatalogPaths();
 let cachedCatalogManifest: {
   manifest: CatalogManifestFile;
   mtimeMs: number;
