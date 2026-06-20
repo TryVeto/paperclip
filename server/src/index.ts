@@ -56,6 +56,7 @@ import { printStartupBanner } from "./startup-banner.js";
 import { getBoardClaimWarningUrl, initializeBoardClaimChallenge } from "./board-claim.js";
 import { maybePersistWorktreeRuntimePorts } from "./worktree-config.js";
 import { initTelemetry, getTelemetryClient } from "./telemetry.js";
+import { initLatitudeTelemetry, shutdownLatitudeTelemetry } from "./latitude-telemetry.js";
 import { conflict } from "./errors.js";
 import type {
   InstanceDatabaseBackupRunResult,
@@ -103,6 +104,7 @@ export async function startServer(): Promise<StartedServer> {
   // Tracing must be active (or have failed and logged) before the first DB
   // connection or the HTTP server exists — see instrumentation.ts.
   await instrumentationReady;
+  initLatitudeTelemetry();
   let config = loadConfig();
   initTelemetry({ enabled: config.telemetryEnabled });
   if (process.env.PAPERCLIP_SECRETS_PROVIDER === undefined) {
@@ -1014,6 +1016,7 @@ export async function startServer(): Promise<StartedServer> {
 
       // Flush buffered OTel spans before the process goes away; without this
       // await the exporter's final batch is dropped on exit.
+      await shutdownLatitudeTelemetry();
       await shutdownInstrumentation();
 
       process.exit(0);
