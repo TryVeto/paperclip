@@ -69,6 +69,7 @@ import { parseObject, asBoolean, asNumber, appendWithByteCap, MAX_EXCERPT_BYTES 
 import { costService } from "./costs.js";
 import { trackAgentFirstHeartbeat } from "@paperclipai/shared/telemetry";
 import { getTelemetryClient } from "../telemetry.js";
+import { captureLatitude } from "../latitude-telemetry.js";
 import { companySkillService } from "./company-skills.js";
 import { budgetService, type BudgetEnforcementScope } from "./budgets.js";
 import { secretService } from "./secrets.js";
@@ -8996,33 +8997,61 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         adapterFinalizeOutcome = status;
       };
 
+      const latitudeRunMetadata = {
+        companyId: agent.companyId,
+        agentId: agent.id,
+        agentName: agent.name,
+        heartbeatRunId: run.id,
+        adapterType: agent.adapterType,
+        invocationSource: run.invocationSource,
+        triggerDetail: run.triggerDetail,
+        issueId: issueRef?.id ?? null,
+        issueIdentifier: issueRef?.identifier ?? null,
+        taskKey: runTaskKey(run),
+        wakeReason: readNonEmptyString(context.wakeReason) ?? null,
+        wakeSource: readNonEmptyString(context.wakeSource) ?? null,
+        executionTargetKind: executionTarget?.kind ?? "local",
+        environmentDriver: selectedEnvironment.driver,
+        requestedModel: readNonEmptyString(parseObject(runtimeConfig).model) ?? null,
+        modelProfile: modelProfileRunMetadata(modelProfileApplication) ?? null,
+      };
+
       let adapterResult: Awaited<ReturnType<typeof adapter.execute>>;
       try {
-        adapterResult = await adapter.execute({
-          runId: run.id,
-          agent,
-          runtime: runtimeForAdapter,
-          config: runtimeConfig,
-          context,
-          runtimeCommandSpec: adapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,
-          executionTarget,
-          executionTransport: remoteExecution
-            ? { remoteExecution: remoteExecution as unknown as Record<string, unknown> }
-            : undefined,
-          onLog,
-          onMeta: onAdapterMeta,
-          onSpawn: async (meta) => {
-            await persistRunProcessMetadata(run.id, {
-              pid: meta.pid,
-              processGroupId:
-                "processGroupId" in meta && typeof meta.processGroupId === "number"
-                  ? meta.processGroupId
-                  : null,
-              startedAt: meta.startedAt,
-            });
+        adapterResult = await captureLatitude(
+          "paperclip.heartbeat.adapter.execute",
+          () => adapter.execute({
+            runId: run.id,
+            agent,
+            runtime: runtimeForAdapter,
+            config: runtimeConfig,
+            context,
+            runtimeCommandSpec: adapter.getRuntimeCommandSpec?.(runtimeConfig) ?? null,
+            executionTarget,
+            executionTransport: remoteExecution
+              ? { remoteExecution: remoteExecution as unknown as Record<string, unknown> }
+              : undefined,
+            onLog,
+            onMeta: onAdapterMeta,
+            onSpawn: async (meta) => {
+              await persistRunProcessMetadata(run.id, {
+                pid: meta.pid,
+                processGroupId:
+                  "processGroupId" in meta && typeof meta.processGroupId === "number"
+                    ? meta.processGroupId
+                    : null,
+                startedAt: meta.startedAt,
+              });
+            },
+            authToken: authToken ?? undefined,
+          }),
+          {
+            userId: agent.id,
+            sessionId: run.id,
+            tags: ["paperclip", "heartbeat", agent.adapterType],
+            metadata: latitudeRunMetadata,
           },
-          authToken: authToken ?? undefined,
-        });
+        );
         // Adapter returned cleanly, which means its workspace-restore finally
         // block also ran without throwing. Record the workspace_finalize
         // barrier so dependents that share this executionWorkspace can wake.
