@@ -53,7 +53,8 @@ A managed home is created empty, so the adapter must provision auth into it befo
 
 - **Managed homes** (the default home and any configured `CODEX_HOME` under the company tree) are always seeded: the ChatGPT-subscription `auth.json` is symlinked from the host Codex home, or, when a per-agent `OPENAI_API_KEY` is configured, an API-key `auth.json` is written instead.
 - **Genuine external overrides** (a `CODEX_HOME` outside the Paperclip-managed company tree) are treated as self-managed and are never seeded or overwritten.
-- **Fail-fast guard:** if a managed home ends up with no usable `auth.json` and no configured API key, the run fails with an explicit `adapter_failed` ("no Codex credentials provisioned for managed home …") rather than emitting an unauthenticated request.
+- **Auth-home preflight:** before launching the worker, `preflightCodexAuthHome` validates the effective `CODEX_HOME` — it creates the home directory when the parent is writable, `chmod 600`s an over-permissive `auth.json`, and checks the directory is readable/writable and `auth.json` is present and readable. Deterministically safe problems are repaired; it never fabricates credentials.
+- **Clean terminal failure (no crash-loop):** if the auth home is unrepairable (missing/unreadable/unwritable directory, missing/unreadable `auth.json`) or a managed home ends up with no usable credentials and no configured API key, the run resolves to a typed `configuration_incomplete` terminal result with an actionable message naming the failing path/check. The server routes that to a human (issue → `blocked` with a source-scoped recovery action) instead of requeuing it — so a bad auth home no longer crash-loops the heartbeat.
 
 ## Manual Local CLI
 

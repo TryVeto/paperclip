@@ -48,10 +48,12 @@ import {
   codexHomeHasUsableAuth,
   isManagedCodexHomePath,
   pathExists,
+  preflightCodexAuthHome,
   prepareManagedCodexHome,
   resolveManagedCodexHomeDir,
   resolveSharedCodexHomeDir,
   seedManagedCodexHome,
+  type CodexAuthHomePreflightResult,
 } from "./codex-home.js";
 import { prepareCodexRuntimeConfig } from "./runtime-config.js";
 import { resolveCodexDesiredSkillNames } from "./skills.js";
@@ -129,6 +131,38 @@ function resolveCodexBiller(env: Record<string, string>, billingType: "api" | "s
   const openAiCompatibleBiller = inferOpenAiCompatibleBiller(env, "openai");
   if (openAiCompatibleBiller === "openrouter") return "openrouter";
   return billingType === "subscription" ? "chatgpt" : openAiCompatibleBiller ?? "openai";
+}
+
+// The server classifies a run whose errorCode is "configuration_incomplete" as
+// a clean terminal failure: it is routed to a human (issue moved to `blocked`
+// with a source-scoped recovery action) instead of being requeued. Returning
+// this — rather than throwing a raw error that finalizes as the requeue-able
+// "adapter_failed"/"setup_failed" — is what stops the codex auth-home
+// crash-loop. Keep this string in sync with the server's
+// CONFIGURATION_INCOMPLETE_FAILURE_CODE.
+const CODEX_CONFIGURATION_INCOMPLETE_ERROR_CODE = "configuration_incomplete";
+
+function buildCodexAuthHomeTerminalFailure(
+  failure: Extract<CodexAuthHomePreflightResult, { ok: false }> | { check: string; path: string; message: string },
+  model: string,
+): AdapterExecutionResult {
+  return {
+    exitCode: 1,
+    signal: null,
+    timedOut: false,
+    errorMessage: failure.message,
+    errorCode: CODEX_CONFIGURATION_INCOMPLETE_ERROR_CODE,
+    errorFamily: null,
+    provider: "openai",
+    model,
+    resultJson: {
+      configurationIncomplete: {
+        reason: "codex_auth_home_unavailable",
+        check: failure.check,
+        path: failure.path,
+      },
+    },
+  };
 }
 
 async function isLikelyPaperclipRepoRoot(candidate: string): Promise<boolean> {
@@ -385,35 +419,77 @@ export async function execute(ctx: AdapterExecutionContext): Promise<AdapterExec
   const configuredHomeIsManaged =
     configuredCodexHome != null &&
     isManagedCodexHomePath(process.env, agent.companyId, configuredCodexHome);
-  if (configuredCodexHome == null) {
-    await prepareManagedCodexHome(process.env, onLog, agent.companyId, {
-      apiKey: configuredOpenAiApiKey,
-    });
-  } else if (configuredHomeIsManaged) {
-    await seedManagedCodexHome(configuredCodexHome, process.env, onLog, {
-      apiKey: configuredOpenAiApiKey,
-    });
-  }
   const defaultCodexHome = resolveManagedCodexHomeDir(process.env, agent.companyId);
   const effectiveCodexHome = configuredCodexHome ?? defaultCodexHome;
-  await fs.mkdir(effectiveCodexHome, { recursive: true });
-
-  // Never launch a managed CODEX_HOME with no credentials. Without auth.json and
-  // with OPENAI_API_KEY="" the provider rejects every request with
-  // "401 Missing bearer"; fail fast with a clear adapter error instead of
-  // emitting unauthenticated calls. External overrides manage their own auth.
   const effectiveHomeIsManaged = configuredCodexHome == null || configuredHomeIsManaged;
-  if (
-    effectiveHomeIsManaged &&
-    !configuredOpenAiApiKey &&
-    !(await codexHomeHasUsableAuth(effectiveCodexHome))
-  ) {
-    throw new Error(
-      `no Codex credentials provisioned for managed home "${effectiveCodexHome}" ` +
-        `(no usable auth.json and OPENAI_API_KEY is empty). ` +
-        `Sign in to Codex on the host with a ChatGPT subscription, or configure a per-agent ` +
-        `OPENAI_API_KEY.`,
-    );
+
+  // Seed the managed home, then preflight it BEFORE launching the worker. A
+  // missing/unreadable/unwritable auth home, an over-permissive auth.json, or a
+  // home with no usable credentials previously surfaced as a raw throw that the
+  // server finalized as the requeue-able "adapter_failed"/"setup_failed" code —
+  // and the recovery sweep then re-dispatched the assigned issue on a loop. We
+  // now repair what is deterministically safe and otherwise return a single
+  // typed "configuration_incomplete" terminal result so the run fails cleanly
+  // and routes to a human instead of crash-looping. External overrides manage
+  // their own auth and are left untouched.
+  try {
+    if (configuredCodexHome == null) {
+      await prepareManagedCodexHome(process.env, onLog, agent.companyId, {
+        apiKey: configuredOpenAiApiKey,
+      });
+    } else if (configuredHomeIsManaged) {
+      await seedManagedCodexHome(configuredCodexHome, process.env, onLog, {
+        apiKey: configuredOpenAiApiKey,
+      });
+    }
+    await fs.mkdir(effectiveCodexHome, { recursive: true });
+  } catch (error) {
+    if (effectiveHomeIsManaged) {
+      return buildCodexAuthHomeTerminalFailure(
+        {
+          check: "home_create",
+          path: effectiveCodexHome,
+          message:
+            `Codex auth home "${effectiveCodexHome}" could not be provisioned ` +
+            `(${error instanceof Error ? error.message : String(error)}). Ensure CODEX_HOME points at a path ` +
+            `whose parent directory is writable and owned by the runtime user.`,
+        },
+        model,
+      );
+    }
+    throw error;
+  }
+
+  if (effectiveHomeIsManaged) {
+    const preflight = await preflightCodexAuthHome(effectiveCodexHome, {
+      // When no per-agent API key is configured, a usable auth.json is required;
+      // with an API key, seeding writes auth.json so it is also validated.
+      requireAuthJson: !configuredOpenAiApiKey,
+      onLog,
+    });
+    if (!preflight.ok) {
+      return buildCodexAuthHomeTerminalFailure(preflight, model);
+    }
+
+    // Never launch a managed CODEX_HOME with no usable credentials. Without a
+    // credential-bearing auth.json and with OPENAI_API_KEY="" the provider
+    // rejects every request with "401 Missing bearer". This is a stronger check
+    // than the preflight's readability gate (it validates the auth.json
+    // payload), so keep it as the final credential guard.
+    if (!configuredOpenAiApiKey && !(await codexHomeHasUsableAuth(effectiveCodexHome))) {
+      return buildCodexAuthHomeTerminalFailure(
+        {
+          check: "auth_missing",
+          path: path.join(effectiveCodexHome, "auth.json"),
+          message:
+            `no Codex credentials provisioned for managed home "${effectiveCodexHome}" ` +
+            `(no usable auth.json and OPENAI_API_KEY is empty). ` +
+            `Sign in to Codex on the host with a ChatGPT subscription, or configure a per-agent ` +
+            `OPENAI_API_KEY.`,
+        },
+        model,
+      );
+    }
   }
   // Merge custom model providers (PAPERCLIP_CODEX_PROVIDERS) into the managed
   // CODEX_HOME's config.toml BEFORE the home is shipped to a remote execution
