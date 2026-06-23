@@ -54,6 +54,12 @@ import {
   workspaceOperations,
 } from "@paperclipai/db";
 import { conflict, HttpError, notFound } from "../errors.js";
+import {
+  classifyRunFailure,
+  evaluateRunCircuitBreaker,
+  resolveAgentCircuitOnSuccess,
+  type CircuitDisposition,
+} from "./circuit-breaker.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
@@ -4928,6 +4934,19 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         },
       });
       publishRunLifecyclePluginEvent(updated);
+
+      if (updated.status === "succeeded") {
+        // Reset the run circuit breaker for this agent: a clean success means
+        // any quarantined/observed failure streak is no longer crash-looping.
+        try {
+          await resolveAgentCircuitOnSuccess(db, updated.companyId, updated.agentId);
+        } catch (err) {
+          logger.warn(
+            { err, runId: updated.id, agentId: updated.agentId },
+            "failed to resolve run circuit breaker after successful run",
+          );
+        }
+      }
     }
 
     return updated;
@@ -5888,6 +5907,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     agent: typeof agents.$inferSelect,
     now: Date,
   ) {
+    // Scheduler circuit breaker: never requeue a process-loss retry that is a
+    // terminal class or a repeated same-fingerprint crash-loop.
+    const breaker = await applyRunRetryCircuitBreaker(run);
+    if (breaker.suppress) {
+      await releaseIssueExecutionAndPromote(run);
+      return null;
+    }
+
     const invokability = await getAgentInvokability(agent);
     if (!invokability.invokable) {
       await appendRunEvent(run, await nextRunEventSeq(run.id), {
@@ -6379,6 +6406,65 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     return { outcome: "promoted", run: promoted };
   }
 
+  /**
+   * Scheduler circuit breaker gate. Classifies a failed run and consults the
+   * run-level breaker ledger. Returns suppress=true when the run must NOT be
+   * requeued — terminal classes (block) or a repeated same-fingerprint failure
+   * (quarantine at 2, dead-letter at 3). Records the decision on the run and
+   * emits a lifecycle event so the suppression is observable.
+   */
+  async function applyRunRetryCircuitBreaker(
+    run: typeof heartbeatRuns.$inferSelect,
+  ): Promise<{ suppress: boolean; disposition: CircuitDisposition }> {
+    const classification = classifyRunFailure({
+      agentId: run.agentId,
+      errorCode: run.errorCode,
+      error: run.error,
+    });
+    const evaluation = await evaluateRunCircuitBreaker(db, {
+      companyId: run.companyId,
+      agentId: run.agentId,
+      runId: run.id,
+      classification,
+    });
+    if (evaluation.disposition === "retry") {
+      return { suppress: false, disposition: "retry" };
+    }
+
+    await db
+      .update(heartbeatRuns)
+      .set({
+        failureFingerprint: classification.fingerprint,
+        failureClass: classification.failureClass,
+        circuitDisposition: evaluation.disposition,
+        updatedAt: new Date(),
+      })
+      .where(eq(heartbeatRuns.id, run.id));
+
+    const message =
+      evaluation.disposition === "block"
+        ? `Automatic retry blocked: terminal failure class "${classification.failureClass}" is never requeued`
+        : evaluation.disposition === "dead_letter"
+          ? `Automatic retry stopped: run dead-lettered after ${evaluation.occurrenceCount} identical failures (fingerprint ${classification.fingerprint})`
+          : `Automatic retry suppressed: run quarantined after ${evaluation.occurrenceCount} identical failures (fingerprint ${classification.fingerprint})`;
+
+    await appendRunEvent(run, await nextRunEventSeq(run.id), {
+      eventType: "lifecycle",
+      stream: "system",
+      level: evaluation.disposition === "dead_letter" ? "error" : "warn",
+      message,
+      payload: {
+        failureClass: classification.failureClass,
+        failureFingerprint: classification.fingerprint,
+        circuitDisposition: evaluation.disposition,
+        occurrenceCount: evaluation.occurrenceCount,
+        errorCode: classification.errorCode,
+      },
+    });
+
+    return { suppress: true, disposition: evaluation.disposition };
+  }
+
   async function scheduleBoundedRetryForRun(
     run: typeof heartbeatRuns.$inferSelect,
     agent: typeof agents.$inferSelect,
@@ -6396,6 +6482,20 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     const wakeReason = opts?.wakeReason ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_WAKE_REASON;
     const maxAttempts = Math.max(0, Math.floor(opts?.maxAttempts ?? BOUNDED_TRANSIENT_HEARTBEAT_RETRY_MAX_ATTEMPTS));
     const nextAttempt = (run.scheduledRetryAttempt ?? 0) + 1;
+
+    // Scheduler circuit breaker: only for real transient failures (not
+    // max-turn continuations). Terminal classes never requeue; a repeated
+    // same-fingerprint failure quarantines/dead-letters instead of looping.
+    if (retryReason === BOUNDED_TRANSIENT_HEARTBEAT_RETRY_REASON) {
+      const breaker = await applyRunRetryCircuitBreaker(run);
+      if (breaker.suppress) {
+        return {
+          outcome: "retry_exhausted" as const,
+          attempt: nextAttempt,
+          maxAttempts,
+        };
+      }
+    }
     const baseSchedule = opts?.delayMs != null
       ? nextAttempt <= maxAttempts
         ? {

@@ -26,7 +26,7 @@ DO $$ BEGIN
 	IF NOT EXISTS (
 		SELECT 1 FROM "pg_constraint" WHERE "conname" = 'heartbeat_run_failures_company_id_companies_id_fk'
 	) THEN
-		ALTER TABLE "heartbeat_run_failures" ADD CONSTRAINT "heartbeat_run_failures_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE no action ON UPDATE no action;
+		ALTER TABLE "heartbeat_run_failures" ADD CONSTRAINT "heartbeat_run_failures_company_id_companies_id_fk" FOREIGN KEY ("company_id") REFERENCES "public"."companies"("id") ON DELETE cascade ON UPDATE no action;
 	END IF;
 END $$;
 --> statement-breakpoint
@@ -34,7 +34,7 @@ DO $$ BEGIN
 	IF NOT EXISTS (
 		SELECT 1 FROM "pg_constraint" WHERE "conname" = 'heartbeat_run_failures_agent_id_agents_id_fk'
 	) THEN
-		ALTER TABLE "heartbeat_run_failures" ADD CONSTRAINT "heartbeat_run_failures_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE no action ON UPDATE no action;
+		ALTER TABLE "heartbeat_run_failures" ADD CONSTRAINT "heartbeat_run_failures_agent_id_agents_id_fk" FOREIGN KEY ("agent_id") REFERENCES "public"."agents"("id") ON DELETE cascade ON UPDATE no action;
 	END IF;
 END $$;
 --> statement-breakpoint

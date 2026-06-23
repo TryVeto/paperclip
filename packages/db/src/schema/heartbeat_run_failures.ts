@@ -27,8 +27,8 @@ export const heartbeatRunFailures = pgTable(
   "heartbeat_run_failures",
   {
     id: uuid("id").primaryKey().defaultRandom(),
-    companyId: uuid("company_id").notNull().references(() => companies.id),
-    agentId: uuid("agent_id").notNull().references(() => agents.id),
+    companyId: uuid("company_id").notNull().references(() => companies.id, { onDelete: "cascade" }),
+    agentId: uuid("agent_id").notNull().references(() => agents.id, { onDelete: "cascade" }),
     fingerprint: text("fingerprint").notNull(),
     failureClass: text("failure_class").notNull(),
     errorCode: text("error_code"),
