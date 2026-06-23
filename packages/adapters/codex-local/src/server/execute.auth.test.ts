@@ -16,7 +16,7 @@ describe("codex managed-home auth fail-fast", () => {
     }
   });
 
-  it("fails fast when a managed CODEX_HOME has no auth.json and OPENAI_API_KEY is empty", async () => {
+  it("returns a clean configuration_incomplete terminal result (not a throw) when a managed CODEX_HOME has no auth.json and OPENAI_API_KEY is empty", async () => {
     const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-failfast-"));
     cleanupDirs.push(root);
 
@@ -42,34 +42,40 @@ describe("codex managed-home auth fail-fast", () => {
     vi.stubEnv("PAPERCLIP_INSTANCE_ID", "default");
     vi.stubEnv("CODEX_HOME", emptySharedHome);
 
-    await expect(
-      execute({
-        runId: "run-failfast",
-        agent: {
-          id: "agent-1",
-          companyId: "company-1",
-          name: "CodexCoder",
-          adapterType: "codex_local",
-          adapterConfig: {},
+    // The crash-loop fix: this must RESOLVE to a typed terminal failure that the
+    // server classifies as a clean (non-requeue-able) "configuration_incomplete"
+    // run, not throw a raw error that finalizes as the requeue-able
+    // "adapter_failed"/"setup_failed" code.
+    const result = await execute({
+      runId: "run-failfast",
+      agent: {
+        id: "agent-1",
+        companyId: "company-1",
+        name: "CodexCoder",
+        adapterType: "codex_local",
+        adapterConfig: {},
+      },
+      runtime: {
+        sessionId: null,
+        sessionParams: null,
+        sessionDisplayId: null,
+        taskKey: null,
+      },
+      config: {
+        command: "codex",
+        cwd: workspaceDir,
+        env: {
+          CODEX_HOME: managedAgentHome,
+          OPENAI_API_KEY: "",
         },
-        runtime: {
-          sessionId: null,
-          sessionParams: null,
-          sessionDisplayId: null,
-          taskKey: null,
-        },
-        config: {
-          command: "codex",
-          cwd: workspaceDir,
-          env: {
-            CODEX_HOME: managedAgentHome,
-            OPENAI_API_KEY: "",
-          },
-        },
-        context: {},
-        onLog: async () => {},
-      }),
-    ).rejects.toThrow(/no Codex credentials provisioned for managed home/);
+      },
+      context: {},
+      onLog: async () => {},
+    });
+
+    expect(result.errorCode).toBe("configuration_incomplete");
+    expect(result.exitCode).not.toBe(0);
+    expect(result.errorMessage).toMatch(/Codex auth file .* is missing|no Codex credentials provisioned for managed home/);
 
     // The managed home must not have been left with a usable auth.json.
     await expect(fs.access(path.join(managedAgentHome, "auth.json"))).rejects.toBeTruthy();

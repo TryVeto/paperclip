@@ -1,4 +1,5 @@
 import fs from "node:fs/promises";
+import { constants as fsConstants } from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import type { AdapterExecutionContext } from "@paperclipai/adapter-utils";
@@ -345,4 +346,163 @@ export async function reconcileManagedCodexHome(
   const status: ReconcileManagedCodexHomeStatus =
     !apiKey && hadUsableAuth ? "already_seeded" : "seeded";
   return { status, home: resolved };
+}
+
+/**
+ * Which auth-home invariant the preflight tripped on. Used by the adapter to
+ * build a precise, actionable terminal-failure message instead of a generic
+ * crash.
+ */
+export type CodexAuthHomeCheck =
+  | "resolve"
+  | "home_create"
+  | "home_access"
+  | "auth_missing"
+  | "auth_unreadable";
+
+export type CodexAuthHomePreflightResult =
+  | { ok: true; home: string; repaired: string[] }
+  | {
+      ok: false;
+      home: string;
+      check: CodexAuthHomeCheck;
+      path: string;
+      message: string;
+    };
+
+function describeErrno(error: unknown): string {
+  if (error && typeof error === "object" && "code" in error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    if (typeof code === "string" && code.length > 0) return code;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Validates — and where deterministically safe, repairs — the Codex auth home
+ * (`CODEX_HOME`) before the worker launches. The codex CLI reads credentials
+ * from `$CODEX_HOME/auth.json` and writes session/rollout state back into the
+ * home, so a missing/unreadable/unwritable home or an over-permissive
+ * `auth.json` makes every run fail. Doing this once, up front, lets the caller
+ * surface a single typed terminal failure instead of letting raw `fs` errors
+ * (or an unauthenticated request) crash-loop the heartbeat.
+ *
+ * Safe, deterministic repairs performed here:
+ *  - create the home directory when it is missing and the parent is writable
+ *  - `chmod 600` an over-permissive `auth.json` (follows the symlink to the
+ *    shared source home, which is exactly where the bad mode usually lives)
+ *
+ * It never fabricates credentials and never writes secrets. Unrepairable
+ * problems are returned as a typed failure naming the path and failed check.
+ */
+export async function preflightCodexAuthHome(
+  home: string,
+  options: {
+    requireAuthJson?: boolean;
+    onLog?: AdapterExecutionContext["onLog"];
+  } = {},
+): Promise<CodexAuthHomePreflightResult> {
+  const onLog = options.onLog;
+  const repaired: string[] = [];
+
+  const resolvedHome = nonEmpty(home);
+  if (!resolvedHome) {
+    return {
+      ok: false,
+      home,
+      check: "resolve",
+      path: home,
+      message:
+        "CODEX_HOME could not be resolved (empty path). Configure a valid Codex auth home directory.",
+    };
+  }
+  const absoluteHome = path.resolve(resolvedHome);
+
+  // Create the home directory if missing and the parent is writable.
+  if (!(await pathExists(absoluteHome))) {
+    try {
+      await fs.mkdir(absoluteHome, { recursive: true });
+      repaired.push(`created Codex home directory "${absoluteHome}"`);
+    } catch (error) {
+      return {
+        ok: false,
+        home: absoluteHome,
+        check: "home_create",
+        path: absoluteHome,
+        message:
+          `Codex auth home "${absoluteHome}" does not exist and could not be created ` +
+          `(${describeErrno(error)}). Ensure CODEX_HOME points at a path whose parent ` +
+          `directory is writable by the runtime user.`,
+      };
+    }
+  }
+
+  // The directory must be readable AND writable by the runtime user: Codex
+  // persists session/rollout state into CODEX_HOME, so a read-only or
+  // wrong-owner directory fails mid-run.
+  try {
+    await fs.access(absoluteHome, fsConstants.R_OK | fsConstants.W_OK);
+  } catch (error) {
+    return {
+      ok: false,
+      home: absoluteHome,
+      check: "home_access",
+      path: absoluteHome,
+      message:
+        `Codex auth home "${absoluteHome}" is not readable and writable by the runtime user ` +
+        `(${describeErrno(error)}). Fix its ownership/permissions (the directory must be owned ` +
+        `by the process user) before retrying.`,
+    };
+  }
+
+  if (options.requireAuthJson) {
+    const authPath = path.join(absoluteHome, "auth.json");
+
+    // Repair an over-permissive auth.json (group/other bits set). `fs.chmod`
+    // follows the symlink, so this fixes the shared source file the managed
+    // home links to — the usual home of the bad mode.
+    const authStat = await fs.stat(authPath).catch(() => null);
+    if (authStat && (authStat.mode & 0o077) !== 0) {
+      try {
+        await fs.chmod(authPath, 0o600);
+        repaired.push(`tightened auth.json permissions to 600 at "${authPath}"`);
+      } catch {
+        // Non-fatal: readability is the hard requirement and is checked next.
+      }
+    }
+
+    try {
+      await fs.access(authPath, fsConstants.R_OK);
+    } catch (error) {
+      const exists = await pathExists(authPath);
+      return exists
+        ? {
+            ok: false,
+            home: absoluteHome,
+            check: "auth_unreadable",
+            path: authPath,
+            message:
+              `Codex auth file "${authPath}" exists but is not readable by the runtime user ` +
+              `(${describeErrno(error)}). Fix its permissions (chmod 600 and correct ownership) before retrying.`,
+          }
+        : {
+            ok: false,
+            home: absoluteHome,
+            check: "auth_missing",
+            path: authPath,
+            message:
+              `Codex auth file "${authPath}" is missing. Sign in to Codex on the host with a ChatGPT ` +
+              `subscription, or configure a per-agent OPENAI_API_KEY so Paperclip can provision auth.json.`,
+          };
+    }
+  }
+
+  if (repaired.length > 0 && onLog) {
+    await onLog(
+      "stdout",
+      `[paperclip] Codex auth-home preflight repaired: ${repaired.join("; ")}.\n`,
+    );
+  }
+
+  return { ok: true, home: absoluteHome, repaired };
 }

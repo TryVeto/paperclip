@@ -6,6 +6,7 @@ import {
   codexHomeHasUsableAuth,
   ensureSymlink,
   isManagedCodexHomePath,
+  preflightCodexAuthHome,
   prepareManagedCodexHome,
   reconcileManagedCodexHome,
   seedManagedCodexHome,
@@ -268,6 +269,113 @@ describe("codexHomeHasUsableAuth", () => {
       expect(await codexHomeHasUsableAuth(root)).toBe(false);
     } finally {
       await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("preflightCodexAuthHome", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it("creates a missing home directory when the parent is writable (repair)", async () => {
+    const root = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-preflight-mkdir-"));
+    try {
+      const home = path.join(root, "codex-home");
+      const result = await preflightCodexAuthHome(home, { requireAuthJson: false });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.repaired.some((entry) => /created Codex home directory/.test(entry))).toBe(true);
+      }
+      expect((await fs.stat(home)).isDirectory()).toBe(true);
+    } finally {
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("tightens an over-permissive auth.json to mode 600 (repair) and passes", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-preflight-chmod-"));
+    try {
+      const authPath = path.join(home, "auth.json");
+      await fs.writeFile(authPath, '{"token":"shared"}', "utf8");
+      await fs.chmod(authPath, 0o644);
+
+      const result = await preflightCodexAuthHome(home, { requireAuthJson: true });
+      expect(result.ok).toBe(true);
+      if (result.ok) {
+        expect(result.repaired.some((entry) => /tightened auth\.json permissions to 600/.test(entry))).toBe(true);
+      }
+      expect((await fs.stat(authPath)).mode & 0o777).toBe(0o600);
+    } finally {
+      await fs.rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a typed auth_missing failure when auth.json is absent and required", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-preflight-missing-"));
+    try {
+      const result = await preflightCodexAuthHome(home, { requireAuthJson: true });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.check).toBe("auth_missing");
+        expect(result.path).toBe(path.join(home, "auth.json"));
+        expect(result.message).toMatch(/missing/i);
+      }
+    } finally {
+      await fs.rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("does not require auth.json when requireAuthJson is false (happy path)", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-preflight-noauth-"));
+    try {
+      const result = await preflightCodexAuthHome(home, { requireAuthJson: false });
+      expect(result.ok).toBe(true);
+    } finally {
+      await fs.rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("passes the happy path with a readable auth.json present", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-preflight-happy-"));
+    try {
+      await fs.writeFile(path.join(home, "auth.json"), '{"token":"shared"}', { mode: 0o600 });
+      const result = await preflightCodexAuthHome(home, { requireAuthJson: true });
+      expect(result.ok).toBe(true);
+    } finally {
+      await fs.rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a typed home_access failure when the directory is not readable/writable", async () => {
+    const home = await fs.mkdtemp(path.join(os.tmpdir(), "paperclip-codex-preflight-access-"));
+    try {
+      // Simulate a wrong-owner / bad-permission directory deterministically
+      // (chmod-based denial is bypassed when tests run as root). Only deny the
+      // R_OK|W_OK access probe; leave the mode-less existence probe untouched.
+      const realAccess = fs.access.bind(fs);
+      vi.spyOn(fs, "access").mockImplementation(async (target, mode) => {
+        if (mode !== undefined) {
+          throw Object.assign(new Error("permission denied"), { code: "EACCES" });
+        }
+        return realAccess(target as Parameters<typeof realAccess>[0]);
+      });
+      const result = await preflightCodexAuthHome(home, { requireAuthJson: false });
+      expect(result.ok).toBe(false);
+      if (!result.ok) {
+        expect(result.check).toBe("home_access");
+        expect(result.path).toBe(home);
+      }
+    } finally {
+      await fs.rm(home, { recursive: true, force: true });
+    }
+  });
+
+  it("returns a typed resolve failure for an empty CODEX_HOME", async () => {
+    const result = await preflightCodexAuthHome("   ", { requireAuthJson: false });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.check).toBe("resolve");
     }
   });
 });
