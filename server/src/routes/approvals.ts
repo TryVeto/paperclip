@@ -4,10 +4,12 @@ import { heartbeatRuns, type Db } from "@paperclipai/db";
 import {
   addApprovalCommentSchema,
   createApprovalSchema,
+  isUuidLike,
   requestApprovalRevisionSchema,
   resolveApprovalSchema,
   resubmitApprovalSchema,
 } from "@paperclipai/shared";
+import { badRequest } from "../errors.js";
 import { validate } from "../middleware/validate.js";
 import { logger } from "../middleware/logger.js";
 import {
@@ -21,6 +23,12 @@ import {
 import { assertBoard, assertCompanyAccess, getActorInfo } from "./authz.js";
 import { redactEventPayload } from "../redaction.js";
 import type { PluginWorkerManager } from "../services/plugin-worker-manager.js";
+
+function assertUuidParam(value: string, label: string): void {
+  if (!isUuidLike(value)) {
+    throw badRequest(`Invalid ${label}`);
+  }
+}
 
 function redactApprovalPayload<T extends { payload: Record<string, unknown> }>(approval: T): T {
   return {
@@ -106,6 +114,7 @@ export function approvalRoutes(
 
   router.get("/companies/:companyId/approvals", async (req, res) => {
     const companyId = req.params.companyId as string;
+    assertUuidParam(companyId, "company ID");
     assertCompanyAccess(req, companyId);
     if (!(await assertApprovalAccessAllowed(req, res, companyId))) return;
     const status = req.query.status as string | undefined;
@@ -115,6 +124,7 @@ export function approvalRoutes(
 
   router.get("/approvals/:id", async (req, res) => {
     const id = req.params.id as string;
+    assertUuidParam(id, "approval ID");
     const approval = await svc.getById(id);
     if (!approval) {
       res.status(404).json({ error: "Approval not found" });
@@ -127,6 +137,7 @@ export function approvalRoutes(
 
   router.post("/companies/:companyId/approvals", validate(createApprovalSchema), async (req, res) => {
     const companyId = req.params.companyId as string;
+    assertUuidParam(companyId, "company ID");
     assertCompanyAccess(req, companyId);
     if (!(await assertApprovalAccessAllowed(req, res, companyId))) return;
     if (!(await assertApprovalMutationAllowedByRunContext(req, res, companyId))) return;
@@ -182,6 +193,7 @@ export function approvalRoutes(
 
   router.get("/approvals/:id/issues", async (req, res) => {
     const id = req.params.id as string;
+    assertUuidParam(id, "approval ID");
     const approval = await svc.getById(id);
     if (!approval) {
       res.status(404).json({ error: "Approval not found" });
@@ -196,6 +208,7 @@ export function approvalRoutes(
   router.post("/approvals/:id/approve", validate(resolveApprovalSchema), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
+    assertUuidParam(id, "approval ID");
     if (!(await requireApprovalAccess(req, id))) {
       res.status(404).json({ error: "Approval not found" });
       return;
@@ -292,6 +305,7 @@ export function approvalRoutes(
   router.post("/approvals/:id/reject", validate(resolveApprovalSchema), async (req, res) => {
     assertBoard(req);
     const id = req.params.id as string;
+    assertUuidParam(id, "approval ID");
     if (!(await requireApprovalAccess(req, id))) {
       res.status(404).json({ error: "Approval not found" });
       return;
@@ -320,6 +334,7 @@ export function approvalRoutes(
     async (req, res) => {
       assertBoard(req);
       const id = req.params.id as string;
+      assertUuidParam(id, "approval ID");
       if (!(await requireApprovalAccess(req, id))) {
         res.status(404).json({ error: "Approval not found" });
         return;
@@ -343,6 +358,7 @@ export function approvalRoutes(
 
   router.post("/approvals/:id/resubmit", validate(resubmitApprovalSchema), async (req, res) => {
     const id = req.params.id as string;
+    assertUuidParam(id, "approval ID");
     const existing = await svc.getById(id);
     if (!existing) {
       res.status(404).json({ error: "Approval not found" });
@@ -382,6 +398,7 @@ export function approvalRoutes(
 
   router.get("/approvals/:id/comments", async (req, res) => {
     const id = req.params.id as string;
+    assertUuidParam(id, "approval ID");
     const approval = await svc.getById(id);
     if (!approval) {
       res.status(404).json({ error: "Approval not found" });
@@ -394,6 +411,7 @@ export function approvalRoutes(
 
   router.post("/approvals/:id/comments", validate(addApprovalCommentSchema), async (req, res) => {
     const id = req.params.id as string;
+    assertUuidParam(id, "approval ID");
     const approval = await svc.getById(id);
     if (!approval) {
       res.status(404).json({ error: "Approval not found" });
