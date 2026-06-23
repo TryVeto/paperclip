@@ -65,6 +65,7 @@ export { documentAnnotationComments } from "./document_annotation_comments.js";
 export { documentAnnotationAnchorSnapshots } from "./document_annotation_anchor_snapshots.js";
 export { heartbeatRuns } from "./heartbeat_runs.js";
 export { heartbeatRunEvents } from "./heartbeat_run_events.js";
+export { heartbeatRunFailures } from "./heartbeat_run_failures.js";
 export { heartbeatRunWatchdogDecisions } from "./heartbeat_run_watchdog_decisions.js";
 export { costEvents } from "./cost_events.js";
 export { financeEvents } from "./finance_events.js";
