@@ -198,7 +198,12 @@ export type ShipGateSnapshot = {
   decompositionCandidate: string;
   verificationCandidate: string;
   runningBuildManifestSha: string;
-  shipReceiptDeployedSha: string;
+  /**
+   * Pre-write closeShip must omit/leave empty — comparing running===deployed before the
+   * write is tautological when both are copied from attestation. Post-write / idempotent
+   * re-close may supply the persisted ship receipt SHA.
+   */
+  shipReceiptDeployedSha?: string | null;
   canonicalSpecUnchanged: boolean;
   canonicalSpecLocked: boolean;
   descendantsDoneCursorProvenance: boolean;
@@ -216,7 +221,8 @@ export function evaluateShipGate(gate: ShipGateSnapshot): { ok: boolean; failure
   if (gate.verificationCandidate !== gate.runningBuildManifestSha) {
     failures.push("verification_candidate_ne_running_build_manifest");
   }
-  if (gate.runningBuildManifestSha !== gate.shipReceiptDeployedSha) {
+  const deployed = gate.shipReceiptDeployedSha?.trim() ?? "";
+  if (deployed && gate.runningBuildManifestSha !== deployed) {
     failures.push("running_build_manifest_ne_ship_receipt_deployed");
   }
   if (!gate.canonicalSpecUnchanged) failures.push("canonical_spec_changed");

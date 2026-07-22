@@ -2,6 +2,9 @@ import { and, eq, isNull, sql } from "drizzle-orm";
 import type { Db } from "@paperclipai/db";
 import {
   agents,
+  documents,
+  issueDocuments,
+  issuePlanDecompositions,
   issues,
   projectVersionContracts,
   projects,
@@ -12,12 +15,14 @@ import {
   type CloseShipInput,
   type OpenVersionInput,
   type SubmitVerificationInput,
+  type VoidShipInput,
 } from "@paperclipai/shared";
 import { conflict, forbidden, badRequest, notFound } from "../errors.js";
 import {
   applyImmutableCapabilitiesToRuntimeConfig,
   assertExecutorForLane,
   buildImmutableLaneCapabilities,
+  CURSOR_IMPLEMENTATION_ADAPTERS,
   deriveDisplayState,
   evaluateShipGate,
   isCursorImplementationMode,
@@ -37,6 +42,90 @@ import {
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 const FREEZE_OPENS_ENV = "PAPERCLIP_FREEZE_VERSION_OPENS";
+const THINKING_ZERO_AGENT_NAME = "Thinking-zero";
+
+type VerificationCheck = {
+  name: string;
+  passed: boolean;
+  detail?: string;
+  command?: string;
+  artifactRef?: string;
+  timestamp?: string;
+};
+
+async function listDescendantIssues(tx: Tx, rootIssueId: string) {
+  const rows = await tx.execute(sql`
+    WITH RECURSIVE descendants AS (
+      SELECT id, parent_id, status, assignee_agent_id, project_id, company_id
+      FROM issues
+      WHERE parent_id = ${rootIssueId}
+      UNION ALL
+      SELECT i.id, i.parent_id, i.status, i.assignee_agent_id, i.project_id, i.company_id
+      FROM issues i
+      INNER JOIN descendants d ON i.parent_id = d.id
+    )
+    SELECT id, parent_id, status, assignee_agent_id, project_id, company_id
+    FROM descendants
+  `);
+  const list = (rows as unknown as { rows?: Array<Record<string, unknown>> }).rows ??
+    (Array.isArray(rows) ? (rows as Array<Record<string, unknown>>) : []);
+  return list.map((r) => ({
+    id: String(r.id),
+    parentId: r.parent_id ? String(r.parent_id) : null,
+    status: String(r.status ?? ""),
+    assigneeAgentId: r.assignee_agent_id ? String(r.assignee_agent_id) : null,
+    projectId: r.project_id ? String(r.project_id) : null,
+    companyId: r.company_id ? String(r.company_id) : null,
+  }));
+}
+
+async function evaluateDescendantsCursorProvenance(
+  tx: Tx,
+  rootIssueId: string,
+): Promise<{ ok: boolean; issues: Array<Record<string, unknown>>; failedPredicates: string[] }> {
+  const descendants = await listDescendantIssues(tx, rootIssueId);
+  const failedPredicates: string[] = [];
+  const issueSummaries: Array<Record<string, unknown>> = [];
+
+  for (const child of descendants) {
+    if (child.status === "cancelled") {
+      issueSummaries.push({ id: child.id, status: child.status, skipped: true });
+      continue;
+    }
+    if (child.status !== "done") {
+      failedPredicates.push(`descendant_not_done:${child.id}`);
+    }
+    let resolvedExecutor: string | null = null;
+    let adapterType: string | null = null;
+    if (child.assigneeAgentId) {
+      const [agent] = await tx.select().from(agents).where(eq(agents.id, child.assigneeAgentId)).limit(1);
+      adapterType = agent?.adapterType ?? null;
+      resolvedExecutor = resolveEffectiveExecutor({
+        adapterType: agent?.adapterType ?? "unknown",
+        delegateAdapter: (agent?.adapterConfig as Record<string, unknown> | null)?.delegateAdapter as
+          | string
+          | undefined,
+      });
+      const mode = ((agent?.adapterConfig as Record<string, unknown> | null)?.mode as string) ?? null;
+      if (!CURSOR_IMPLEMENTATION_ADAPTERS.has(resolvedExecutor)) {
+        failedPredicates.push(`descendant_non_cursor:${child.id}:${resolvedExecutor}`);
+      } else if (!isCursorImplementationMode(mode)) {
+        failedPredicates.push(`descendant_invalid_cursor_mode:${child.id}:${mode}`);
+      }
+    } else if (child.status === "done") {
+      failedPredicates.push(`descendant_missing_assignee:${child.id}`);
+    }
+    issueSummaries.push({
+      id: child.id,
+      status: child.status,
+      assigneeAgentId: child.assigneeAgentId,
+      adapterType,
+      resolvedExecutor,
+    });
+  }
+
+  return { ok: failedPredicates.length === 0, issues: issueSummaries, failedPredicates };
+}
 
 function asRow(row: typeof projectVersionContracts.$inferSelect): VersionContractRow {
   return {
@@ -538,93 +627,152 @@ export function versionContractService(db: Db) {
     },
 
     async submitVerification(projectId: string, input: SubmitVerificationInput) {
-      const capsule = await getByProject(projectId, input.versionKey);
-      if (!capsule) throw notFound("Version not found");
-      if (capsule.shippedAt) throw conflict("version_already_shipped", { code: "version_already_shipped" });
-
-      const failedPredicates: string[] = [];
-      if (!capsule.acceptedDecompositionId) failedPredicates.push("missing_decomposition");
-      if (capsule.canonicalSpecKind === "plan_document" && !capsule.acceptedSpecRevisionId) {
-        failedPredicates.push("missing_accepted_spec");
-      }
-      if (capsule.canonicalSpecKind === "bootstrap_file") {
-        if (normalizeSha(capsule.canonicalSpecBlobSha ?? "") !== V007_BOOTSTRAP.immutableSpecBlobSha) {
-          failedPredicates.push("canonical_spec_blob_changed");
-        }
+      const attestation = getBuildManifestAttestation();
+      if (!attestation?.candidateSha) {
+        throw conflict("missing_build_manifest_attestation", { code: "missing_build_manifest_attestation" });
       }
 
-      for (const check of input.checkResults) {
-        if (!check.passed) failedPredicates.push(`check_failed:${check.name}`);
-      }
-
-      const candidate = input.candidateSourceSha
-        ? normalizeSha(input.candidateSourceSha)
-        : capsule.candidateSourceSha;
-      if (!candidate || !isSha40(candidate)) failedPredicates.push("malformed_or_missing_candidate_sha");
-
-      const receipt = {
-        versionKey: capsule.versionKey,
-        productBaseSha: capsule.productBaseSha,
-        canonicalSpec: {
-          kind: capsule.canonicalSpecKind,
-          path: capsule.canonicalSpecPath,
-          commitSha: capsule.canonicalSpecCommitSha,
-          blobSha: capsule.canonicalSpecBlobSha,
-          acceptedRevisionId: capsule.acceptedSpecRevisionId,
-        },
-        decompositionId: capsule.acceptedDecompositionId,
-        decompositionFingerprint: capsule.acceptedDecompositionFingerprint,
-        candidateSourceSha: candidate,
-        checks: input.checkResults,
-        failedPredicates,
-        generatedAt: new Date().toISOString(),
-        generatedBy: "paperclip.versionContractService",
+      // Caller SHA/checkResults are untrusted evidence only — never authority.
+      const untrustedCallerEvidence = {
+        candidateSourceSha: input.candidateSourceSha ? normalizeSha(input.candidateSourceSha) : null,
+        checkResults: input.checkResults ?? [],
       };
 
-      if (failedPredicates.length > 0) {
-        await db
+      return db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`version-verify:${projectId}`}))`);
+        const [row] = await tx
+          .select()
+          .from(projectVersionContracts)
+          .where(
+            and(
+              eq(projectVersionContracts.projectId, projectId),
+              eq(projectVersionContracts.versionKey, input.versionKey),
+            ),
+          )
+          .limit(1);
+        if (!row) throw notFound("Version not found");
+        const capsule = asRow(row);
+        if (capsule.shippedAt) throw conflict("version_already_shipped", { code: "version_already_shipped" });
+
+        const failedPredicates: string[] = [];
+        const checks: VerificationCheck[] = [];
+        const candidate = normalizeSha(attestation.candidateSha);
+        if (!isSha40(candidate)) failedPredicates.push("malformed_or_missing_candidate_sha");
+
+        if (capsule.canonicalSpecKind === "plan_document" && !capsule.acceptedSpecRevisionId) {
+          failedPredicates.push("missing_accepted_spec");
+        }
+        if (capsule.canonicalSpecKind === "plan_document" && !capsule.acceptedDecompositionId) {
+          failedPredicates.push("missing_decomposition");
+        }
+        if (capsule.canonicalSpecKind === "bootstrap_file") {
+          const blobOk =
+            normalizeSha(capsule.canonicalSpecBlobSha ?? "") === V007_BOOTSTRAP.immutableSpecBlobSha;
+          checks.push({
+            name: "canonical_spec_blob_pin",
+            passed: blobOk,
+            detail: capsule.canonicalSpecBlobSha ?? undefined,
+          });
+          if (!blobOk) failedPredicates.push("canonical_spec_blob_changed");
+        }
+
+        const provenance = await evaluateDescendantsCursorProvenance(tx, capsule.rootIssueId);
+        failedPredicates.push(...provenance.failedPredicates);
+        checks.push({
+          name: "descendants_done_cursor_provenance",
+          passed: provenance.ok,
+          detail: `descendants=${provenance.issues.length}`,
+        });
+
+        if (capsule.acceptedDecompositionId) {
+          const [decomp] = await tx
+            .select()
+            .from(issuePlanDecompositions)
+            .where(eq(issuePlanDecompositions.id, capsule.acceptedDecompositionId))
+            .limit(1);
+          const decompOk =
+            Boolean(decomp) &&
+            (capsule.canonicalSpecKind !== "plan_document" ||
+              decomp!.acceptedPlanRevisionId === capsule.acceptedSpecRevisionId);
+          checks.push({
+            name: "decomposition_binding",
+            passed: decompOk,
+            detail: decomp?.id,
+          });
+          if (!decompOk) failedPredicates.push("decomposition_binding_mismatch");
+        }
+
+        checks.push({
+          name: "running_build_attestation",
+          passed: isSha40(candidate),
+          detail: candidate,
+        });
+
+        const receipt = {
+          versionKey: capsule.versionKey,
+          productBaseSha: capsule.productBaseSha,
+          canonicalSpec: {
+            kind: capsule.canonicalSpecKind,
+            path: capsule.canonicalSpecPath,
+            commitSha: capsule.canonicalSpecCommitSha,
+            blobSha: capsule.canonicalSpecBlobSha,
+            acceptedRevisionId: capsule.acceptedSpecRevisionId,
+          },
+          decompositionId: capsule.acceptedDecompositionId,
+          decompositionFingerprint: capsule.acceptedDecompositionFingerprint,
+          candidateSourceSha: candidate,
+          implementationIssues: provenance.issues,
+          checks,
+          untrustedCallerEvidence,
+          failedPredicates,
+          generatedAt: new Date().toISOString(),
+          generatedBy: "paperclip.versionContractService.submitVerification",
+        };
+
+        if (failedPredicates.length > 0) {
+          await tx
+            .update(projectVersionContracts)
+            .set({
+              blockReason: failedPredicates.join(","),
+              updatedAt: new Date(),
+            })
+            .where(eq(projectVersionContracts.id, capsule.id));
+          return { ok: false as const, receipt, failedPredicates, displayState: "blocked" as const };
+        }
+
+        if (capsule.verificationReceiptLockedAt && capsule.verificationReceipt) {
+          const prev = capsule.verificationReceipt as Record<string, unknown>;
+          if (normalizeSha(String(prev.candidateSourceSha ?? "")) !== candidate) {
+            throw conflict("verification_receipt_conflict", { code: "verification_receipt_conflict" });
+          }
+          return {
+            ok: true as const,
+            receipt: capsule.verificationReceipt,
+            failedPredicates: [],
+            displayState: "ship_ready" as const,
+          };
+        }
+
+        const [updated] = await tx
           .update(projectVersionContracts)
           .set({
-            blockReason: failedPredicates.join(","),
+            candidateSourceSha: candidate,
+            verificationReceipt: receipt,
+            verificationReceiptLockedAt: new Date(),
+            blockReason: null,
             updatedAt: new Date(),
           })
-          .where(eq(projectVersionContracts.id, capsule.id));
-        return { ok: false as const, receipt, failedPredicates, displayState: "blocked" as const };
-      }
+          .where(eq(projectVersionContracts.id, capsule.id))
+          .returning();
 
-      // Idempotent lock: same receipt content ok; conflict if different locked receipt
-      if (capsule.verificationReceiptLockedAt && capsule.verificationReceipt) {
-        const prev = capsule.verificationReceipt as Record<string, unknown>;
-        if (prev.candidateSourceSha !== candidate) {
-          throw conflict("verification_receipt_conflict", { code: "verification_receipt_conflict" });
-        }
         return {
           ok: true as const,
-          receipt: capsule.verificationReceipt,
+          receipt,
           failedPredicates: [],
-          displayState: "ship_ready" as const,
+          displayState: deriveDisplayState(asRow(updated)),
+          capsule: asRow(updated),
         };
-      }
-
-      const [updated] = await db
-        .update(projectVersionContracts)
-        .set({
-          candidateSourceSha: candidate!,
-          verificationReceipt: receipt,
-          verificationReceiptLockedAt: new Date(),
-          blockReason: null,
-          updatedAt: new Date(),
-        })
-        .where(eq(projectVersionContracts.id, capsule.id))
-        .returning();
-
-      return {
-        ok: true as const,
-        receipt,
-        failedPredicates: [],
-        displayState: deriveDisplayState(asRow(updated)),
-        capsule: asRow(updated),
-      };
+      });
     },
 
     getRunningBuildAttestation(): BuildManifestAttestation | null {
@@ -656,7 +804,7 @@ export function versionContractService(db: Db) {
 
         if (capsule.shippedAt && capsule.shipReceipt) {
           const prev = capsule.shipReceipt as Record<string, unknown>;
-          if (prev.deployedSourceSha === attestation.candidateSha) {
+          if (normalizeSha(String(prev.deployedSourceSha ?? "")) === normalizeSha(attestation.candidateSha)) {
             return { ...capsule, displayState: deriveDisplayState(capsule), idempotent: true };
           }
           throw conflict("ship_receipt_conflict", { code: "ship_receipt_conflict" });
@@ -666,29 +814,52 @@ export function versionContractService(db: Db) {
           throw conflict("verification_required", { code: "verification_required" });
         }
 
+        const lockedReceipt = capsule.verificationReceipt as Record<string, unknown>;
+        const verificationCandidate = normalizeSha(String(lockedReceipt.candidateSourceSha ?? ""));
+        const running = normalizeSha(attestation.candidateSha);
+
         const acceptedCanonicalSpec =
           capsule.canonicalSpecKind === "bootstrap_file"
-            ? capsule.canonicalSpecBlobSha ?? ""
-            : capsule.acceptedSpecRevisionId ?? "";
-        const decompositionSpec = acceptedCanonicalSpec;
-        const verificationCandidate = normalizeSha(capsule.candidateSourceSha);
-        const running = normalizeSha(attestation.candidateSha);
+            ? normalizeSha(capsule.canonicalSpecBlobSha ?? "")
+            : (capsule.acceptedSpecRevisionId ?? "");
+
+        let decompositionSpec = "";
+        let decompositionCandidate = "";
+        if (capsule.canonicalSpecKind === "bootstrap_file") {
+          // Independent pin constant — not a copy of the capsule column into both sides.
+          decompositionSpec = V007_BOOTSTRAP.immutableSpecBlobSha;
+          decompositionCandidate = verificationCandidate;
+        } else if (capsule.acceptedDecompositionId) {
+          const [decomp] = await tx
+            .select()
+            .from(issuePlanDecompositions)
+            .where(eq(issuePlanDecompositions.id, capsule.acceptedDecompositionId))
+            .limit(1);
+          decompositionSpec = decomp?.acceptedPlanRevisionId ?? "";
+          const fp = capsule.acceptedDecompositionFingerprint ?? "";
+          decompositionCandidate = isSha40(fp) ? normalizeSha(fp) : verificationCandidate;
+        }
+
+        const provenance = await evaluateDescendantsCursorProvenance(tx, capsule.rootIssueId);
+        const receiptFailed = Array.isArray(lockedReceipt.failedPredicates)
+          ? (lockedReceipt.failedPredicates as unknown[])
+          : [];
 
         const gate = evaluateShipGate({
           acceptedCanonicalSpec,
           decompositionSpec,
-          decompositionCandidate: verificationCandidate,
+          decompositionCandidate,
           verificationCandidate,
           runningBuildManifestSha: running,
-          shipReceiptDeployedSha: running,
+          // Intentionally omitted pre-write — deployed SHA is written from attestation below.
+          shipReceiptDeployedSha: null,
           canonicalSpecUnchanged:
             capsule.canonicalSpecKind !== "bootstrap_file" ||
             normalizeSha(capsule.canonicalSpecBlobSha ?? "") === V007_BOOTSTRAP.immutableSpecBlobSha,
           canonicalSpecLocked:
             capsule.canonicalSpecKind === "bootstrap_file" || Boolean(capsule.acceptedSpecRevisionId),
-          descendantsDoneCursorProvenance: true,
-          requiredPredicatesPassed: !Array.isArray((capsule.verificationReceipt as { failedPredicates?: unknown }).failedPredicates) ||
-            ((capsule.verificationReceipt as { failedPredicates: unknown[] }).failedPredicates.length === 0),
+          descendantsDoneCursorProvenance: provenance.ok,
+          requiredPredicatesPassed: receiptFailed.length === 0 && provenance.failedPredicates.length === 0,
         });
 
         if (!gate.ok) {
@@ -701,6 +872,13 @@ export function versionContractService(db: Db) {
           deployedSourceSha: running,
           verificationCandidate,
           buildManifest: attestation,
+          gateSnapshot: {
+            acceptedCanonicalSpec,
+            decompositionSpec,
+            decompositionCandidate,
+            verificationCandidate,
+            runningBuildManifestSha: running,
+          },
           generatedAt: new Date().toISOString(),
           generatedBy: "paperclip.versionContractService.closeShip",
         };
@@ -723,6 +901,62 @@ export function versionContractService(db: Db) {
       });
     },
 
+    async voidShip(projectId: string, input: VoidShipInput) {
+      return db.transaction(async (tx) => {
+        await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`version-ship:${projectId}`}))`);
+        const [row] = await tx
+          .select()
+          .from(projectVersionContracts)
+          .where(
+            and(
+              eq(projectVersionContracts.projectId, projectId),
+              eq(projectVersionContracts.versionKey, input.versionKey),
+            ),
+          )
+          .limit(1);
+        if (!row) throw notFound("Version not found");
+        if (!row.shippedAt) {
+          throw conflict("version_not_shipped", { code: "version_not_shipped" });
+        }
+
+        const priorHistory = Array.isArray(row.receiptHistory)
+          ? (row.receiptHistory as Record<string, unknown>[])
+          : [];
+        const archiveEntry = {
+          voidedAt: new Date().toISOString(),
+          reason: input.reason ?? "board_void_ship",
+          shippedAt: row.shippedAt?.toISOString?.() ?? String(row.shippedAt),
+          deployedSourceSha: row.deployedSourceSha,
+          shipReceipt: row.shipReceipt,
+          shipReceiptLockedAt: row.shipReceiptLockedAt?.toISOString?.() ?? row.shipReceiptLockedAt,
+          verificationReceipt: row.verificationReceipt,
+          verificationReceiptLockedAt:
+            row.verificationReceiptLockedAt?.toISOString?.() ?? row.verificationReceiptLockedAt,
+          candidateSourceSha: row.candidateSourceSha,
+        };
+
+        const [updated] = await tx
+          .update(projectVersionContracts)
+          .set({
+            receiptHistory: [...priorHistory, archiveEntry],
+            shippedAt: null,
+            deployedSourceSha: null,
+            shipReceipt: null,
+            shipReceiptLockedAt: null,
+            verificationReceipt: null,
+            verificationReceiptLockedAt: null,
+            candidateSourceSha: null,
+            blockReason: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(projectVersionContracts.id, row.id))
+          .returning();
+
+        const result = asRow(updated);
+        return { ...result, displayState: deriveDisplayState(result), archived: archiveEntry };
+      });
+    },
+
     async adoptBootstrap(input: AdoptBootstrapInput) {
       const attestation = getBuildManifestAttestation();
       if (!attestation?.candidateSha) {
@@ -730,14 +964,22 @@ export function versionContractService(db: Db) {
       }
 
       return db.transaction(async (tx) => {
-        const existing = await tx.select({ id: projectVersionContracts.id }).from(projectVersionContracts).limit(1);
+        await tx.execute(
+          sql`SELECT pg_advisory_xact_lock(hashtext(${`version-bootstrap:${input.companyId}`}))`,
+        );
+
+        // Race-safe: lock any existing capsules before counting.
+        await tx.execute(sql`SELECT id FROM project_version_contracts FOR UPDATE`);
+        const existing = await tx.select({ id: projectVersionContracts.id }).from(projectVersionContracts);
+        const attestedCandidate = normalizeSha(attestation.candidateSha);
+
         const eligible = isV007BootstrapEligible({
           existingCapsuleCount: existing.length,
           versionKey: input.versionKey,
           productBaseSha: input.productBaseSha,
           specBlobSha: input.specBlobSha,
-          runningManifestSha: attestation.candidateSha,
-          candidateSha: input.candidateSourceSha,
+          runningManifestSha: attestedCandidate,
+          candidateSha: attestedCandidate,
         });
         if (!eligible.ok) {
           throw conflict("adopt_bootstrap_rejected", {
@@ -745,12 +987,73 @@ export function versionContractService(db: Db) {
             predicate: eligible.predicate,
           });
         }
-        if (normalizeSha(input.candidateSourceSha) !== normalizeSha(attestation.candidateSha)) {
+        if (normalizeSha(input.candidateSourceSha) !== attestedCandidate) {
           throw conflict("adopt_bootstrap_rejected", {
             code: "adopt_bootstrap_rejected",
             predicate: "manifest_candidate_mismatch",
           });
         }
+
+        const [project] = await tx.select().from(projects).where(eq(projects.id, input.projectId)).limit(1);
+        if (!project || project.companyId !== input.companyId) {
+          throw conflict("adopt_bootstrap_rejected", {
+            code: "adopt_bootstrap_rejected",
+            predicate: "project_company_mismatch",
+          });
+        }
+
+        const [root] = await tx.select().from(issues).where(eq(issues.id, input.rootIssueId)).limit(1);
+        if (!root || root.projectId !== input.projectId || root.companyId !== input.companyId) {
+          throw conflict("adopt_bootstrap_rejected", {
+            code: "adopt_bootstrap_rejected",
+            predicate: "root_issue_ownership_mismatch",
+          });
+        }
+
+        const [doc] = await tx
+          .select()
+          .from(documents)
+          .where(eq(documents.id, input.bootstrapEvidenceDocumentId))
+          .limit(1)
+          .for("update");
+        if (!doc || doc.companyId !== input.companyId) {
+          throw conflict("adopt_bootstrap_rejected", {
+            code: "adopt_bootstrap_rejected",
+            predicate: "bootstrap_evidence_missing",
+          });
+        }
+        if (!doc.latestBody || !doc.latestBody.trim()) {
+          throw conflict("adopt_bootstrap_rejected", {
+            code: "adopt_bootstrap_rejected",
+            predicate: "bootstrap_evidence_empty",
+          });
+        }
+
+        const [link] = await tx
+          .select()
+          .from(issueDocuments)
+          .where(eq(issueDocuments.documentId, input.bootstrapEvidenceDocumentId))
+          .limit(1);
+        if (
+          !link ||
+          link.companyId !== input.companyId ||
+          link.issueId !== input.rootIssueId
+        ) {
+          throw conflict("adopt_bootstrap_rejected", {
+            code: "adopt_bootstrap_rejected",
+            predicate: "bootstrap_evidence_not_bound_to_root",
+          });
+        }
+
+        const lockAt = new Date();
+        await tx
+          .update(documents)
+          .set({
+            lockedAt: lockAt,
+            lockedByUserId: "board:adopt-bootstrap",
+            updatedAt: lockAt,
+          })
+          .where(eq(documents.id, doc.id));
 
         const verificationReceipt = {
           versionKey: "v0.07",
@@ -763,9 +1066,25 @@ export function versionContractService(db: Db) {
           },
           decompositionId: input.decompositionId ?? null,
           decompositionFingerprint: input.decompositionFingerprint ?? null,
-          candidateSourceSha: normalizeSha(input.candidateSourceSha),
-          bootstrapEvidenceDocumentId: input.bootstrapEvidenceDocumentId,
-          checks: [{ name: "bootstrap_evidence", passed: true }],
+          candidateSourceSha: attestedCandidate,
+          bootstrapEvidence: {
+            documentId: doc.id,
+            revisionId: doc.latestRevisionId,
+            revisionNumber: doc.latestRevisionNumber,
+            lockedAt: lockAt.toISOString(),
+            bodyChars: doc.latestBody.length,
+            issueDocumentId: link.id,
+            issueId: link.issueId,
+          },
+          checks: [
+            { name: "bootstrap_evidence_present", passed: true },
+            { name: "bootstrap_evidence_nonempty", passed: true },
+            { name: "bootstrap_evidence_locked", passed: true },
+            { name: "running_build_attestation", passed: true, detail: attestedCandidate },
+          ],
+          untrustedCallerEvidence: {
+            candidateSourceSha: normalizeSha(input.candidateSourceSha),
+          },
           failedPredicates: [],
           generatedAt: new Date().toISOString(),
           generatedBy: "paperclip.versionContractService.adoptBootstrap",
@@ -787,15 +1106,30 @@ export function versionContractService(db: Db) {
             canonicalSpecBlobSha: V007_BOOTSTRAP.immutableSpecBlobSha,
             acceptedDecompositionId: input.decompositionId ?? null,
             acceptedDecompositionFingerprint: input.decompositionFingerprint ?? null,
-            candidateSourceSha: normalizeSha(input.candidateSourceSha),
+            candidateSourceSha: attestedCandidate,
             verificationReceipt,
-            verificationReceiptLockedAt: new Date(),
-            openIdempotencyKey: `adopt-bootstrap:v0.07:${normalizeSha(input.candidateSourceSha)}`,
+            verificationReceiptLockedAt: lockAt,
+            openIdempotencyKey: `adopt-bootstrap:v0.07:${attestedCandidate}`,
           })
           .returning();
 
         const row = asRow(inserted);
         return { ...row, displayState: deriveDisplayState(row) };
+      });
+    },
+
+    /** Route helper: board or Thinking-zero may submit verification. */
+    async assertVerificationAuthorized(actor: {
+      type: string;
+      agentId?: string | null;
+    }) {
+      if (actor.type === "board") return { ok: true as const };
+      if (actor.type === "agent" && actor.agentId) {
+        const [agent] = await db.select().from(agents).where(eq(agents.id, actor.agentId)).limit(1);
+        if (agent?.name === THINKING_ZERO_AGENT_NAME) return { ok: true as const, agent };
+      }
+      throw forbidden("Verification requires board or Thinking-zero", {
+        code: "verification_actor_denied",
       });
     },
 

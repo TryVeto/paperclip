@@ -7,6 +7,7 @@ import {
   deriveDisplayState,
   evaluateShipGate,
   isCursorImplementationMode,
+  isSha40,
   isV007BootstrapEligible,
   resolveEffectiveExecutor,
   versionLaneForIssue,
@@ -150,6 +151,95 @@ describe("version-contract policy", () => {
     expect(fail.failures).toContain("verification_candidate_ne_running_build_manifest");
   });
 
+  it("pre-write ship gate is non-tautological: omits deployed SHA and catches independent mismatches", () => {
+    const sha = "a".repeat(40);
+    const other = "b".repeat(40);
+    const preWrite = evaluateShipGate({
+      acceptedCanonicalSpec: V007_BOOTSTRAP.immutableSpecBlobSha,
+      decompositionSpec: V007_BOOTSTRAP.immutableSpecBlobSha,
+      decompositionCandidate: sha,
+      verificationCandidate: sha,
+      runningBuildManifestSha: sha,
+      shipReceiptDeployedSha: null,
+      canonicalSpecUnchanged: true,
+      canonicalSpecLocked: true,
+      descendantsDoneCursorProvenance: true,
+      requiredPredicatesPassed: true,
+    });
+    expect(preWrite.ok).toBe(true);
+    expect(preWrite.failures).not.toContain("running_build_manifest_ne_ship_receipt_deployed");
+
+    const forgedRunning = evaluateShipGate({
+      acceptedCanonicalSpec: V007_BOOTSTRAP.immutableSpecBlobSha,
+      decompositionSpec: V007_BOOTSTRAP.immutableSpecBlobSha,
+      decompositionCandidate: sha,
+      verificationCandidate: sha,
+      runningBuildManifestSha: other,
+      shipReceiptDeployedSha: null,
+      canonicalSpecUnchanged: true,
+      canonicalSpecLocked: true,
+      descendantsDoneCursorProvenance: true,
+      requiredPredicatesPassed: true,
+    });
+    expect(forgedRunning.ok).toBe(false);
+    expect(forgedRunning.failures).toContain("verification_candidate_ne_running_build_manifest");
+
+    const specSidesDiffer = evaluateShipGate({
+      acceptedCanonicalSpec: "rev-accepted",
+      decompositionSpec: "rev-from-decomposition-row",
+      decompositionCandidate: sha,
+      verificationCandidate: sha,
+      runningBuildManifestSha: sha,
+      shipReceiptDeployedSha: null,
+      canonicalSpecUnchanged: true,
+      canonicalSpecLocked: true,
+      descendantsDoneCursorProvenance: true,
+      requiredPredicatesPassed: true,
+    });
+    expect(specSidesDiffer.ok).toBe(false);
+    expect(specSidesDiffer.failures).toContain("accepted_canonical_spec_ne_decomposition_spec");
+
+    const descendantsIncomplete = evaluateShipGate({
+      acceptedCanonicalSpec: "blob",
+      decompositionSpec: "blob",
+      decompositionCandidate: sha,
+      verificationCandidate: sha,
+      runningBuildManifestSha: sha,
+      shipReceiptDeployedSha: null,
+      canonicalSpecUnchanged: true,
+      canonicalSpecLocked: true,
+      descendantsDoneCursorProvenance: false,
+      requiredPredicatesPassed: true,
+    });
+    expect(descendantsIncomplete.failures).toContain("descendant_cursor_provenance_incomplete");
+  });
+
+  it("treats forged caller candidate SHA as irrelevant to attestation eligibility", () => {
+    const attested = "c".repeat(40);
+    const forged = "d".repeat(40);
+    // Eligibility binds running manifest to candidate — both must be the attested SHA.
+    expect(
+      isV007BootstrapEligible({
+        existingCapsuleCount: 0,
+        versionKey: "v0.07",
+        productBaseSha: V007_BOOTSTRAP.productBaseSha,
+        specBlobSha: V007_BOOTSTRAP.immutableSpecBlobSha,
+        runningManifestSha: attested,
+        candidateSha: attested,
+      }).ok,
+    ).toBe(true);
+    expect(
+      isV007BootstrapEligible({
+        existingCapsuleCount: 0,
+        versionKey: "v0.07",
+        productBaseSha: V007_BOOTSTRAP.productBaseSha,
+        specBlobSha: V007_BOOTSTRAP.immutableSpecBlobSha,
+        runningManifestSha: attested,
+        candidateSha: forged,
+      }).predicate,
+    ).toBe("manifest_candidate_mismatch");
+  });
+
   it("v0.07 bootstrap pins base and blob and self-disables after first capsule", () => {
     const candidate = "e".repeat(40);
     expect(
@@ -221,7 +311,7 @@ describe("build manifest attestation", () => {
 });
 
 describe("migration journal uniqueness", () => {
-  it("registers 0184_project_version_contracts once", async () => {
+  it("registers version-contract migrations once with receipt_history tip", async () => {
     const { readFileSync } = await import("node:fs");
     const { resolve } = await import("node:path");
     const journalPath = resolve(__dirname, "../../../packages/db/src/migrations/meta/_journal.json");
@@ -230,6 +320,25 @@ describe("migration journal uniqueness", () => {
     };
     const tags = journal.entries.map((e) => e.tag);
     expect(tags.filter((t) => t === "0184_project_version_contracts")).toHaveLength(1);
-    expect(tags.at(-1)).toBe("0184_project_version_contracts");
+    expect(tags.filter((t) => t === "0185_version_contract_receipt_history")).toHaveLength(1);
+    expect(tags.at(-1)).toBe("0185_version_contract_receipt_history");
+  });
+});
+
+describe("voidShip archive shape (policy-level contract)", () => {
+  it("documents that void clears ship lock while preserving history payload fields", () => {
+    // Service integration covers DB round-trip; this guards the archive contract shape.
+    const archive = {
+      voidedAt: new Date().toISOString(),
+      reason: "incident_repair",
+      shippedAt: new Date().toISOString(),
+      deployedSourceSha: "e".repeat(40),
+      shipReceipt: { deployedSourceSha: "e".repeat(40) },
+      verificationReceipt: { candidateSourceSha: "e".repeat(40) },
+      candidateSourceSha: "e".repeat(40),
+    };
+    expect(archive.shipReceipt.deployedSourceSha).toBe(archive.deployedSourceSha);
+    expect(isSha40(archive.candidateSourceSha)).toBe(true);
+    expect(deriveDisplayState(baseRow({ shippedAt: null, verificationReceipt: null }))).toBe("specifying");
   });
 });

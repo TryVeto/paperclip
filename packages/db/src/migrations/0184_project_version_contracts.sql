@@ -111,7 +111,10 @@ ALTER TABLE "project_version_contracts" ADD CONSTRAINT "project_version_contract
       ("canonical_spec_kind" = 'bootstrap_file' AND "canonical_spec_blob_sha" IS NOT NULL)
       OR ("canonical_spec_kind" = 'plan_document' AND "accepted_spec_revision_id" IS NOT NULL)
     )
-    AND "accepted_decomposition_id" IS NOT NULL
+    AND (
+      "canonical_spec_kind" = 'bootstrap_file'
+      OR "accepted_decomposition_id" IS NOT NULL
+    )
     AND "verification_receipt" IS NOT NULL
     AND "verification_receipt_locked_at" IS NOT NULL
     AND "candidate_source_sha" IS NOT NULL

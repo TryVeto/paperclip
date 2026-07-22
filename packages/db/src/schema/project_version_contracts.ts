@@ -70,6 +70,8 @@ export const projectVersionContracts = pgTable(
     deployedSourceSha: text("deployed_source_sha"),
     shipReceipt: jsonb("ship_receipt").$type<Record<string, unknown>>(),
     shipReceiptLockedAt: timestamp("ship_receipt_locked_at", { withTimezone: true }),
+    /** Archived ship/verification receipts from board voidShip / reopen (incident history). */
+    receiptHistory: jsonb("receipt_history").$type<Record<string, unknown>[]>().default([]),
 
     blockReason: text("block_reason"),
     openIdempotencyKey: text("open_idempotency_key"),

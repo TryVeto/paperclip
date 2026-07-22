@@ -61,6 +61,7 @@ export const adoptBootstrapSchema = z.object({
   specCommitSha: GIT_SHA40,
   specBlobSha: z.literal("c9a2782c8e42c99d46729f54d4bc74bbe511a4e0"),
   specPath: z.literal("doc/plans/2026-07-22-paperclip-v0.07.md"),
+  /** Untrusted evidence only — server binds candidate from running attestation. */
   candidateSourceSha: GIT_SHA40,
   bootstrapEvidenceDocumentId: z.string().uuid(),
   rootIssueId: z.string().uuid(),
@@ -71,6 +72,12 @@ export const adoptBootstrapSchema = z.object({
   decompositionFingerprint: z.string().optional(),
 });
 export type AdoptBootstrapInput = z.infer<typeof adoptBootstrapSchema>;
+
+export const voidShipSchema = z.object({
+  versionKey: z.string().min(1),
+  reason: z.string().min(1).max(2000).optional(),
+});
+export type VoidShipInput = z.infer<typeof voidShipSchema>;
 
 /** Fixed handoff constants for Paperclip v0.07 bootstrap. */
 export const V007_BOOTSTRAP = {

@@ -13,6 +13,7 @@ import {
   submitVerificationSchema,
   closeShipSchema,
   adoptBootstrapSchema,
+  voidShipSchema,
 } from "@paperclipai/shared";
 import type { WorkspaceRuntimeDesiredState, WorkspaceRuntimeServiceStateMap } from "@paperclipai/shared";
 import { trackProjectCreated } from "@paperclipai/shared/telemetry";
@@ -270,9 +271,28 @@ export function projectRoutes(db: Db) {
     const project = await getAccessibleResource(req, res, svc.getById(id), "Project not found");
     if (!project) return;
     try {
+      const actor = getActorInfo(req);
+      await versions.assertVerificationAuthorized({
+        type: req.actor.type,
+        agentId: actor.agentId,
+      });
       const result = await versions.submitVerification(project.id, {
         ...req.body,
         versionKey: req.params.versionKey as string,
+      });
+      await logActivity(db, {
+        companyId: project.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: "version.verification_submitted",
+        entityType: "project",
+        entityId: project.id,
+        details: {
+          versionKey: req.params.versionKey,
+          ok: result.ok,
+          failedPredicates: result.failedPredicates,
+        },
       });
       res.json(result);
     } catch (err) {
@@ -304,6 +324,41 @@ export function projectRoutes(db: Db) {
         entityType: "project_version_contract",
         entityId: result.id,
         details: { versionKey: result.versionKey, deployedSourceSha: result.deployedSourceSha },
+      });
+      res.json(result);
+    } catch (err) {
+      if (err instanceof HttpError) {
+        res.status(err.status).json({ error: err.message, details: err.details });
+        return;
+      }
+      throw err;
+    }
+  });
+
+  router.post("/projects/:id/versions/:versionKey/void-ship", validate(voidShipSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const project = await getAccessibleResource(req, res, svc.getById(id), "Project not found");
+    if (!project) return;
+    assertBoard(req);
+    try {
+      const result = await versions.voidShip(project.id, {
+        versionKey: req.params.versionKey as string,
+        reason: req.body.reason,
+      });
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId: project.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: "version.ship_voided",
+        entityType: "project_version_contract",
+        entityId: result.id,
+        details: {
+          versionKey: result.versionKey,
+          reason: req.body.reason ?? "board_void_ship",
+          archivedDeployedSourceSha: (result.archived as { deployedSourceSha?: string }).deployedSourceSha,
+        },
       });
       res.json(result);
     } catch (err) {

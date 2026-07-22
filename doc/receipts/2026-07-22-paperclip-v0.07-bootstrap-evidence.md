@@ -5,7 +5,7 @@ authoritative verification receipt (Paperclip generates that server-side).
 
 | Field | Value |
 |---|---|
-| Candidate SHA | 71ea473dbdd1a9d7afb041043356f3388f3a2dca |
+| Candidate SHA | 3c50854bb764ebfc7bce85ac4ca2eacce5530dac |
 | Spec path | doc/plans/2026-07-22-paperclip-v0.07.md |
 | Immutable spec blob | c9a2782c8e42c99d46729f54d4bc74bbe511a4e0 |
 | Handoff spec commit (Mac) | 11f920182fdf908e2476c144505b1e659427015d |
@@ -22,8 +22,8 @@ authoritative verification receipt (Paperclip generates that server-side).
 - [x] Canonical blob equals handoff blob `c9a2782c…`
 - [x] Spec file not modified by Cursor commits
 - [x] Unit/policy acceptance tests green
-- [ ] Deploy candidate with `scripts/write-build-manifest.mjs` into release artifact
-- [ ] Board `adopt-bootstrap` once on deployed binary
-- [ ] Board `closeShip` for v0.07
-- [ ] Dry-run open v0.08 only after `shipped_at`
+- [x] Deploy candidate with `build-manifest.json` into release artifact (`3c50854…` overlay on live `9cad4cb…-r2`)
+- [x] Board `adopt-bootstrap` once on deployed binary (capsule `92a08833…`, issue `VET-581`)
+- [x] Board `closeShip` for v0.07 (`shippedAt` set; deployed SHA = candidate)
+- [x] Dry-run open v0.08 only after `shipped_at` (clears `active_version_exists`; next gate `specification_owner_not_codex` as expected without a Codex adapter agent)
 

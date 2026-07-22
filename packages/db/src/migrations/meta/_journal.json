@@ -1282,6 +1282,13 @@
       "when": 1784740000000,
       "tag": "0184_project_version_contracts",
       "breakpoints": true
+    },
+    {
+      "idx": 185,
+      "version": "7",
+      "when": 1784743600000,
+      "tag": "0185_version_contract_receipt_history",
+      "breakpoints": true
     }
   ]
 }

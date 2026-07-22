@@ -2227,10 +2227,12 @@ export {
   submitVerificationSchema,
   closeShipSchema,
   adoptBootstrapSchema,
+  voidShipSchema,
   V007_BOOTSTRAP,
   type VersionDisplayState,
   type OpenVersionInput,
   type SubmitVerificationInput,
   type CloseShipInput,
   type AdoptBootstrapInput,
+  type VoidShipInput,
 } from "./validators/version-contract.js";
