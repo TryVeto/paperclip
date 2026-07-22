@@ -1,4 +1,5 @@
-import { pgTable, uuid, text, timestamp, integer, jsonb, index, bigserial } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
+import { pgTable, uuid, text, timestamp, integer, jsonb, index, uniqueIndex, bigserial } from "drizzle-orm/pg-core";
 import { companies } from "./companies.js";
 import { agents } from "./agents.js";
 import { heartbeatRuns } from "./heartbeat_runs.js";
@@ -23,6 +24,10 @@ export const heartbeatRunEvents = pgTable(
     runSeqIdx: index("heartbeat_run_events_run_seq_idx").on(table.runId, table.seq),
     companyRunIdx: index("heartbeat_run_events_company_run_idx").on(table.companyId, table.runId),
     companyCreatedIdx: index("heartbeat_run_events_company_created_idx").on(table.companyId, table.createdAt),
+    fastDecisionTerminalUq: uniqueIndex("heartbeat_run_events_fast_decision_terminal_uq")
+      .on(table.runId)
+      .where(sql`${table.eventType} = 'lifecycle'
+        and ${table.payload}->>'runtime' = 'fast-decision-v1'
+        and ${table.payload} ? 'status'`),
   }),
 );
-

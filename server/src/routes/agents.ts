@@ -3700,7 +3700,11 @@ export function agentRoutes(
     if (!existing) return;
     const run = await heartbeat.cancelRun(runId);
 
-    if (run) {
+    if (run?.status === "running") {
+      throw conflict("Run has already committed a fast-decision result and is finishing deterministically");
+    }
+
+    if (run?.status === "cancelled") {
       await logActivity(db, {
         companyId: run.companyId,
         actorType: "user",

@@ -476,7 +476,7 @@ Allowed transitions:
 
 - `backlog -> todo | cancelled`
 - `todo -> in_progress | blocked | cancelled`
-- `in_progress -> in_review | blocked | done | cancelled`
+- `in_progress -> backlog | in_review | blocked | done | cancelled`
 - `in_review -> in_progress | done | cancelled`
 - `blocked -> todo | in_progress | cancelled`
 - terminal: `done`, `cancelled`
@@ -486,6 +486,7 @@ Side effects:
 - entering `in_progress` sets `started_at` if null
 - entering `done` sets `completed_at`
 - entering `cancelled` sets `cancelled_at`
+- returning `in_progress -> backlog` is an explicit defer decision; it clears the active checkout and assignee rather than leaving an executor attached to deferred work
 
 V1 non-terminal liveness rule:
 
