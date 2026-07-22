@@ -377,6 +377,84 @@ describeEmbeddedPostgres("heartbeat fast decision lane", () => {
     expect(runtime[0]).toMatchObject({ lastRunId: run.id, lastRunStatus: "succeeded" });
   });
 
+  it("preserves an applied marker when outer execution cleanup sees a post-apply failure", async () => {
+    const ids = await seedFastDecisionScenario(db);
+    const afterApply = vi.fn(() => {
+      throw new Error("injected failure after fast-decision apply");
+    });
+    const heartbeat = trackHeartbeat(heartbeatService(db, {
+      runtimeEnv: fastDecisionEnv(ids),
+      fastDecisionFetch: vi.fn(async () => decisionResponse(
+        "comment_and_done",
+        "The decision is conclusive.",
+        "No tools are required.",
+      )),
+      fastDecisionAfterApply: afterApply,
+    }));
+    const queued = await heartbeat.invoke(
+      ids.fastAgentId,
+      "assignment",
+      { issueId: ids.issueId, wakeReason: "issue_assigned" },
+      "system",
+      { actorType: "system", actorId: "fast-decision-test" },
+    );
+    await vi.waitFor(() => expect(afterApply).toHaveBeenCalledTimes(1));
+    await heartbeat.waitForRunExecutionDrain(queued!.id);
+
+    const appliedRun = await db
+      .select()
+      .from(heartbeatRuns)
+      .where(eq(heartbeatRuns.id, queued!.id))
+      .then((rows) => rows[0]!);
+    expect(appliedRun.status).toBe("running");
+    expect(appliedRun.error).toBeNull();
+    expect(appliedRun.resultJson).toMatchObject({
+      fastDecision: { version: "fast-decision-v1", phase: "applied", action: "comment_and_done" },
+    });
+    const appliedIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, ids.issueId))
+      .then((rows) => rows[0]!);
+    expect(appliedIssue).toMatchObject({ status: "done", executionRunId: null });
+
+    await heartbeat.reapOrphanedRuns({ staleThresholdMs: 0 });
+
+    const recoveredRun = await waitForTerminalRun(db, queued!.id);
+    expect(recoveredRun.status).toBe("succeeded");
+    expect(recoveredRun.resultJson).toMatchObject({
+      fastDecision: { phase: "applied", finalizationPhase: "complete" },
+    });
+    const recoveredIssue = await db
+      .select()
+      .from(issues)
+      .where(eq(issues.id, ids.issueId))
+      .then((rows) => rows[0]!);
+    expect(recoveredIssue.executionRunId).toBeNull();
+    const comments = await db
+      .select()
+      .from(issueComments)
+      .where(eq(issueComments.createdByRunId, queued!.id));
+    expect(comments).toHaveLength(1);
+    const ledger = await db
+      .select()
+      .from(costEvents)
+      .where(eq(costEvents.heartbeatRunId, queued!.id));
+    expect(ledger).toHaveLength(1);
+    const taggedTerminalEvents = await db
+      .select()
+      .from(heartbeatRunEvents)
+      .where(and(
+        eq(heartbeatRunEvents.runId, queued!.id),
+        eq(heartbeatRunEvents.eventType, "lifecycle"),
+        sql`${heartbeatRunEvents.payload}->>'runtime' = 'fast-decision-v1'`,
+        sql`${heartbeatRunEvents.payload} ? 'status'`,
+      ));
+    expect(taggedTerminalEvents).toHaveLength(1);
+    expect(afterApply).toHaveBeenCalledTimes(1);
+    expect(mockAdapterExecute).not.toHaveBeenCalled();
+  });
+
   it("checks out before applying backlog and leaves no execution lock", async () => {
     const ids = await seedFastDecisionScenario(db);
     const fetchImpl = vi.fn(async () => decisionResponse(

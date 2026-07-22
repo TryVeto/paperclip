@@ -5380,6 +5380,8 @@ export interface HeartbeatServiceOptions {
   environmentRuntime?: HeartbeatEnvironmentRuntime;
   runtimeEnv?: Record<string, string | undefined>;
   fastDecisionFetch?: FastDecisionFetch;
+  /** Test-only fault injection after the atomic issue/run apply transaction. */
+  fastDecisionAfterApply?: (runId: string) => void | Promise<void>;
 }
 
 function isTruthyRuntimeEnvValue(value: string | undefined) {
@@ -12769,6 +12771,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       throw error;
     });
 
+    if (applied.kind === "applied") {
+      await options.fastDecisionAfterApply?.(run.id);
+    }
+
     if (applied.kind === "lost") {
       logger.info({ runId: run.id }, "fast-decision apply lost run or issue ownership");
       const error = "Fast decision lost issue ownership before applying its result";
@@ -15475,20 +15481,40 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             "setup_failed";
           logger.error({ err: outerErr, runId }, "heartbeat execution setup failed");
           const setupFailureAgent = await getAgent(run.agentId).catch(() => null);
-          const setupFailureWrite = await setRunStatusIfRunning(runId, "failed", {
-            error: message,
-            errorCode: setupFailureErrorCode,
-            finishedAt: new Date(),
-            ...(setupFailureAgent ? {
-              resultJson: mergeRunStopMetadataForAgent(setupFailureAgent, "failed", {
+          const setupFailureWrite = await setRunStatusIfRunningUnlessAppliedFastDecision(
+            runId,
+            "failed",
+            (current) => {
+              const specificResultJson = workspaceValidationSetupFailure?.resultJson
+                ?? configurationIncompleteSetupFailure?.resultJson
+                ?? null;
+              const currentResultJson = parseObject(current.resultJson);
+              return {
+                error: message,
                 errorCode: setupFailureErrorCode,
-                errorMessage: message,
-                resultJson:
-                  workspaceValidationSetupFailure?.resultJson ?? configurationIncompleteSetupFailure?.resultJson ?? null,
-              }),
-            } : {}),
-          }).catch(() => ({ run: null, updated: false as const }));
-          if (!setupFailureWrite.updated) {
+                finishedAt: new Date(),
+                ...(setupFailureAgent ? {
+                  resultJson: mergeRunStopMetadataForAgent(setupFailureAgent, "failed", {
+                    errorCode: setupFailureErrorCode,
+                    errorMessage: message,
+                    resultJson: specificResultJson
+                      ? { ...currentResultJson, ...parseObject(specificResultJson) }
+                      : currentResultJson,
+                  }),
+                } : {}),
+              };
+            },
+          ).catch(() => ({
+            run: null,
+            updated: false as const,
+            appliedFastDecision: false,
+          }));
+          if (setupFailureWrite.appliedFastDecision) {
+            logger.warn(
+              { runId },
+              "preserving applied fast-decision marker after post-apply execution failure for deterministic recovery",
+            );
+          } else if (!setupFailureWrite.updated) {
             logger.info(
               {
                 runId,
