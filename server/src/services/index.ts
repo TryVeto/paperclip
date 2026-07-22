@@ -31,6 +31,13 @@ export {
   refreshIssueContinuationSummary,
 } from "./issue-continuation-summary.js";
 export { projectService } from "./projects.js";
+export { versionContractService } from "./version-contracts.js";
+export {
+  deriveDisplayState,
+  assertExecutorForLane,
+  evaluateShipGate,
+  isV007BootstrapEligible,
+} from "./version-contract-policy.js";
 export {
   clampIssueListLimit,
   ISSUE_LIST_DEFAULT_LIMIT,

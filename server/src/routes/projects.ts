@@ -9,15 +9,25 @@ import {
   updateProjectSchema,
   updateProjectWorkspaceSchema,
   workspaceRuntimeControlTargetSchema,
+  openVersionSchema,
+  submitVerificationSchema,
+  closeShipSchema,
+  adoptBootstrapSchema,
 } from "@paperclipai/shared";
 import type { WorkspaceRuntimeDesiredState, WorkspaceRuntimeServiceStateMap } from "@paperclipai/shared";
 import { trackProjectCreated } from "@paperclipai/shared/telemetry";
 import { validate } from "../middleware/validate.js";
-import { accessService, projectService, logActivity, workspaceOperationService } from "../services/index.js";
-import { conflict, forbidden } from "../errors.js";
+import {
+  accessService,
+  projectService,
+  logActivity,
+  workspaceOperationService,
+  versionContractService,
+} from "../services/index.js";
+import { conflict, forbidden, HttpError } from "../errors.js";
 import { externalObjectService } from "../services/external-objects.js";
 import { instanceSettingsService } from "../services/instance-settings.js";
-import { assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
+import { assertBoard, assertCompanyAccess, getAccessibleResource, getActorInfo } from "./authz.js";
 import {
   buildWorkspaceRuntimeDesiredStatePatch,
   listConfiguredRuntimeServiceEntries,
@@ -215,6 +225,126 @@ export function projectRoutes(db: Db) {
       trackProjectCreated(telemetryClient);
     }
     res.status(201).json(hydratedProject ?? project);
+  });
+
+  const versions = versionContractService(db);
+
+  router.get("/projects/:id/versions/active", async (req, res) => {
+    const id = req.params.id as string;
+    const project = await getAccessibleResource(req, res, svc.getById(id), "Project not found");
+    if (!project) return;
+    const view = await versions.projectVersionView(project.id);
+    res.json(view);
+  });
+
+  router.post("/projects/:id/versions", validate(openVersionSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const project = await getAccessibleResource(req, res, svc.getById(id), "Project not found");
+    if (!project) return;
+    assertBoard(req);
+    try {
+      const opened = await versions.openVersion(project.id, req.body);
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId: project.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: "version.opened",
+        entityType: "project_version_contract",
+        entityId: opened.id,
+        details: { versionKey: opened.versionKey, rootIssueId: opened.rootIssueId },
+      });
+      res.status(201).json(opened);
+    } catch (err) {
+      if (err instanceof HttpError) {
+        res.status(err.status).json({ error: err.message, details: err.details });
+        return;
+      }
+      throw err;
+    }
+  });
+
+  router.post("/projects/:id/versions/:versionKey/verification", validate(submitVerificationSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const project = await getAccessibleResource(req, res, svc.getById(id), "Project not found");
+    if (!project) return;
+    try {
+      const result = await versions.submitVerification(project.id, {
+        ...req.body,
+        versionKey: req.params.versionKey as string,
+      });
+      res.json(result);
+    } catch (err) {
+      if (err instanceof HttpError) {
+        res.status(err.status).json({ error: err.message, details: err.details });
+        return;
+      }
+      throw err;
+    }
+  });
+
+  router.post("/projects/:id/versions/:versionKey/ship", validate(closeShipSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const project = await getAccessibleResource(req, res, svc.getById(id), "Project not found");
+    if (!project) return;
+    assertBoard(req);
+    try {
+      const result = await versions.closeShip(project.id, {
+        ...req.body,
+        versionKey: req.params.versionKey as string,
+      });
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId: project.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: "version.shipped",
+        entityType: "project_version_contract",
+        entityId: result.id,
+        details: { versionKey: result.versionKey, deployedSourceSha: result.deployedSourceSha },
+      });
+      res.json(result);
+    } catch (err) {
+      if (err instanceof HttpError) {
+        res.status(err.status).json({ error: err.message, details: err.details });
+        return;
+      }
+      throw err;
+    }
+  });
+
+  router.post("/projects/:id/versions/adopt-bootstrap", validate(adoptBootstrapSchema), async (req, res) => {
+    const id = req.params.id as string;
+    const project = await getAccessibleResource(req, res, svc.getById(id), "Project not found");
+    if (!project) return;
+    assertBoard(req);
+    if (req.body.projectId !== project.id || req.body.companyId !== project.companyId) {
+      res.status(400).json({ error: "adopt-bootstrap project/company mismatch" });
+      return;
+    }
+    try {
+      const result = await versions.adoptBootstrap(req.body);
+      const actor = getActorInfo(req);
+      await logActivity(db, {
+        companyId: project.companyId,
+        actorType: actor.actorType,
+        actorId: actor.actorId,
+        agentId: actor.agentId,
+        action: "version.adopt_bootstrap",
+        entityType: "project_version_contract",
+        entityId: result.id,
+        details: { versionKey: result.versionKey, candidateSourceSha: result.candidateSourceSha },
+      });
+      res.status(201).json(result);
+    } catch (err) {
+      if (err instanceof HttpError) {
+        res.status(err.status).json({ error: err.message, details: err.details });
+        return;
+      }
+      throw err;
+    }
   });
 
   router.patch("/projects/:id", validate(updateProjectSchema), async (req, res) => {

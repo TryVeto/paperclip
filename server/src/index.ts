@@ -822,6 +822,21 @@ export async function startServer(): Promise<StartedServer> {
     throw err;
   }
 
+  try {
+    const { loadBuildManifestAtStartup } = await import("./build-manifest.js");
+    const manifest = loadBuildManifestAtStartup();
+    if (manifest) {
+      logger.info(
+        { candidateSha: manifest.candidateSha, productBaseSha: manifest.productBaseSha },
+        "build manifest attestation loaded",
+      );
+    } else {
+      logger.warn("no build manifest attestation found at startup");
+    }
+  } catch (err) {
+    logger.warn({ err }, "failed to load build manifest attestation");
+  }
+
   let drainHeartbeatRunsForShutdown: ((signal: "SIGINT" | "SIGTERM") => Promise<unknown>) | null = null;
   let prepareHotRestartShutdown: ((signal: "SIGINT" | "SIGTERM") => Promise<{ skipDrain: boolean }>) | null = null;
   let heartbeatSchedulerStopped = false;

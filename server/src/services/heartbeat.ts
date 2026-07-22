@@ -13592,6 +13592,33 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         if (managedMcpConfig) {
           adapterContext.paperclipManagedMcp = managedMcpConfig;
         }
+        // Version contract: immutable lane capabilities applied LAST before execute.
+        if (issueRef?.id) {
+          const { versionContractService } = await import("./version-contracts.js");
+          const versionSvc = versionContractService(db);
+          const laneInfo = await versionSvc.resolveLaneForIssue(issueRef.id);
+          versionSvc.assertDispatchExecutor({
+            lane: laneInfo.lane,
+            adapterType: agent.adapterType,
+            delegateAdapter: (runtimeConfig as Record<string, unknown>).delegateAdapter as string | undefined,
+            routingDelegate:
+              ((runtimeConfig as Record<string, unknown>).paperclipRouting as { delegateAdapter?: string } | undefined)
+                ?.delegateAdapter ?? null,
+          });
+          runtimeConfig = versionSvc.applyImmutableLaneCapabilities(
+            runtimeConfig as Record<string, unknown>,
+            laneInfo.capabilities,
+          ) as typeof runtimeConfig;
+          if (laneInfo.capabilities.disposableSpecSnapshot) {
+            adapterContext.paperclipSpecSnapshot = true;
+            adapterContext.paperclipForbidFinalize = true;
+            adapterContext.paperclipForbidCommit = true;
+            adapterContext.paperclipForbidMerge = true;
+          }
+          if (laneInfo.capabilities.workspaceBaseSha) {
+            adapterContext.paperclipImplementationBaseSha = laneInfo.capabilities.workspaceBaseSha;
+          }
+        }
         adapterResult = await adapter.execute({
           runId: run.id,
           agent,

@@ -2219,3 +2219,18 @@ export {
   type EnvironmentCustomImageTerminalSessionToken,
 } from "./validators/environment-custom-images.js";
 export * from "./validators/skill-policy.js";
+export {
+  GIT_SHA40,
+  versionDisplayStateSchema,
+  canonicalSpecKindSchema,
+  openVersionSchema,
+  submitVerificationSchema,
+  closeShipSchema,
+  adoptBootstrapSchema,
+  V007_BOOTSTRAP,
+  type VersionDisplayState,
+  type OpenVersionInput,
+  type SubmitVerificationInput,
+  type CloseShipInput,
+  type AdoptBootstrapInput,
+} from "./validators/version-contract.js";

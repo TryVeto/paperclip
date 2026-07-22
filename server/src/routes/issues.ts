@@ -119,6 +119,7 @@ import {
   projectService,
   routineService,
   workProductService,
+  versionContractService,
 } from "../services/index.js";
 import { buildPlanReviewContext } from "../services/plan-review-context.js";
 import { hydrateSuccessfulRunHandoffLiveness } from "../services/successful-run-handoff-state.js";
@@ -6021,6 +6022,31 @@ export function issueRoutes(
 
     const actor = getActorInfo(req);
     const sourceTrust = await sourceTrustForActorWrite(issue, actor);
+    try {
+      await versionContractService(db).assertCanonicalPlanMutation({
+        issueId: issue.id,
+        documentKey: keyParsed.data,
+        actorAgentId: actor.agentId ?? null,
+        actorType: req.actor.type === "agent" ? "agent" : req.actor.type === "board" ? "board" : "system",
+        runId: actor.runId ?? null,
+        isActiveRootRun: Boolean(actor.runId),
+        baseRevisionId: req.body.baseRevisionId ?? null,
+        action: "upsert",
+      });
+    } catch (err) {
+      if (err instanceof HttpError) {
+        res.status(err.status).json({ error: err.message, details: err.details });
+        return;
+      }
+      throw err;
+    }
+    // Version-bound canonical plan must never redirect via create_new_document.
+    const lockedDocumentStrategy =
+      keyParsed.data === "plan" && (await versionContractService(db).getByRootIssue(issue.id))
+        ? "conflict"
+        : req.actor.type === "agent"
+          ? "create_new_document"
+          : "conflict";
     const referenceSummaryBefore = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
     const result = await documentsSvc.upsertIssueDocument({
       issueId: issue.id,
@@ -6034,7 +6060,7 @@ export function issueRoutes(
       createdByUserId: actor.actorType === "user" ? actor.actorId : null,
       createdByRunId: actor.runId ?? null,
       sourceTrust,
-      lockedDocumentStrategy: req.actor.type === "agent" ? "create_new_document" : "conflict",
+      lockedDocumentStrategy,
     });
     const doc = result.document;
     const redirectedFromLockedDocument =
@@ -6194,6 +6220,21 @@ export function issueRoutes(
     }
 
     const actor = getActorInfo(req);
+    try {
+      await versionContractService(db).assertCanonicalPlanMutation({
+        issueId: issue.id,
+        documentKey: keyParsed.data,
+        actorAgentId: actor.agentId ?? null,
+        actorType: "board",
+        action: "unlock",
+      });
+    } catch (err) {
+      if (err instanceof HttpError) {
+        res.status(err.status).json({ error: err.message, details: err.details });
+        return;
+      }
+      throw err;
+    }
     const result = await documentsSvc.unlockIssueDocument(issue.id, keyParsed.data);
 
     if (result.changed) {
@@ -6362,6 +6403,21 @@ export function issueRoutes(
     if (!keyParsed.success) {
       res.status(400).json({ error: "Invalid document key", details: keyParsed.error.issues });
       return;
+    }
+    try {
+      await versionContractService(db).assertCanonicalPlanMutation({
+        issueId: issue.id,
+        documentKey: keyParsed.data,
+        actorAgentId: null,
+        actorType: "board",
+        action: "delete",
+      });
+    } catch (err) {
+      if (err instanceof HttpError) {
+        res.status(err.status).json({ error: err.message, details: err.details });
+        return;
+      }
+      throw err;
     }
     const referenceSummaryBefore = await issueReferencesSvc.listIssueReferenceSummary(issue.id);
     const removed = await documentsSvc.deleteIssueDocument(issue.id, keyParsed.data);
@@ -7453,6 +7509,53 @@ export function issueRoutes(
       }
     }
 
+    // Version contract: validate Cursor-only child set before any insert.
+    const versionSvc = versionContractService(db);
+    const versionRoot = await versionSvc.getByRootIssue(sourceIssue.id);
+    if (versionRoot) {
+      try {
+        const childExecutors = [];
+        for (const child of normalizedChildren) {
+          let adapterType = "cursor";
+          let mode: string | null = null;
+          if (child.assigneeAgentId) {
+            const [agent] = await db
+              .select()
+              .from(agents)
+              .where(eq(agents.id, child.assigneeAgentId))
+              .limit(1);
+            adapterType = agent?.adapterType ?? "cursor";
+            mode = ((agent?.adapterConfig as Record<string, unknown> | null)?.mode as string) ?? null;
+          }
+          childExecutors.push({
+            assigneeAgentId: child.assigneeAgentId ?? null,
+            adapterType,
+            mode,
+          });
+        }
+        // Pre-validate via assertDecomposition with a temporary fingerprint bind after insert
+        for (const child of childExecutors) {
+          const { assertExecutorForLane, resolveEffectiveExecutor, isCursorImplementationMode } =
+            await import("../services/version-contract-policy.js");
+          const effective = resolveEffectiveExecutor({ adapterType: child.adapterType ?? "cursor" });
+          const check = assertExecutorForLane("implementation", effective);
+          if (!check.ok || !isCursorImplementationMode(child.mode)) {
+            res.status(409).json({
+              error: "decomposition_assignee_not_cursor",
+              details: { code: "decomposition_assignee_not_cursor", predicate: check.predicate, mode: child.mode },
+            });
+            return;
+          }
+        }
+      } catch (err) {
+        if (err instanceof HttpError) {
+          res.status(err.status).json({ error: err.message, details: err.details });
+          return;
+        }
+        throw err;
+      }
+    }
+
     const result = await svc.decomposeAcceptedPlan(sourceIssue.id, {
       acceptedPlanRevisionId: req.body.acceptedPlanRevisionId,
       children: normalizedChildren,
@@ -7460,6 +7563,35 @@ export function issueRoutes(
       actorUserId: actor.actorType === "user" ? actor.actorId : null,
       actorRunId: actor.runId ?? null,
     });
+
+    if (versionRoot) {
+      try {
+        const childExecutors = [];
+        for (const child of normalizedChildren) {
+          let adapterType = "cursor";
+          let mode: string | null = null;
+          if (child.assigneeAgentId) {
+            const [agent] = await db.select().from(agents).where(eq(agents.id, child.assigneeAgentId)).limit(1);
+            adapterType = agent?.adapterType ?? "cursor";
+            mode = ((agent?.adapterConfig as Record<string, unknown> | null)?.mode as string) ?? null;
+          }
+          childExecutors.push({ assigneeAgentId: child.assigneeAgentId ?? null, adapterType, mode });
+        }
+        await versionSvc.assertDecomposition({
+          rootIssueId: sourceIssue.id,
+          acceptedPlanRevisionId: req.body.acceptedPlanRevisionId,
+          children: childExecutors,
+          fingerprint: result.decomposition.requestFingerprint,
+          decompositionId: result.decomposition.id,
+        });
+      } catch (err) {
+        if (err instanceof HttpError) {
+          res.status(err.status).json({ error: err.message, details: err.details });
+          return;
+        }
+        throw err;
+      }
+    }
 
     await logActivity(db, {
       companyId: sourceIssue.companyId,
@@ -9082,6 +9214,38 @@ export function issueRoutes(
         agentId: actor.agentId,
         userId: actor.actorType === "user" ? actor.actorId : null,
       });
+      // Version contract: acceptance + lock of canonical plan in the same flow
+      if (
+        interaction.kind === "request_confirmation" &&
+        interaction.status === "accepted" &&
+        interaction.payload &&
+        typeof interaction.payload === "object"
+      ) {
+        const target = (interaction.payload as { target?: { type?: string; key?: string; revisionId?: string } }).target;
+        if (target?.type === "issue_document" && target.key === "plan" && target.revisionId) {
+          try {
+            await versionContractService(db).onPlanAccepted({
+              rootIssueId: issue.id,
+              revisionId: target.revisionId,
+              confirmationId: interaction.id,
+              lockDocument: async () => {
+                await documentsSvc.lockIssueDocument({
+                  issueId: issue.id,
+                  key: "plan",
+                  lockedByUserId: actor.actorType === "user" ? actor.actorId : null,
+                  lockedByAgentId: actor.agentId ?? null,
+                });
+              },
+            });
+          } catch (err) {
+            if (err instanceof HttpError) {
+              res.status(err.status).json({ error: err.message, details: err.details });
+              return;
+            }
+            throw err;
+          }
+        }
+      }
       const toolAction = interaction.payload && typeof interaction.payload === "object"
         ? (interaction.payload as { toolAction?: { actionRequestId?: unknown } }).toolAction
         : null;
