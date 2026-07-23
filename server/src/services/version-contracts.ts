@@ -1002,17 +1002,57 @@ export function versionContractService(db: Db) {
           throw conflict("version_not_shipped", { code: "version_not_shipped" });
         }
 
-        // Closed release records are immutable. voidShip must not clear shippedAt,
-        // deployedSourceSha, shipReceipt, or verification locks. Append-only
-        // observations belong in a separate audit channel — never reopen-by-void.
-        throw conflict("shipped_record_immutable", {
-          code: "shipped_record_immutable",
-          detail: "closed releases cannot be voided or rewritten; open a new version instead",
-          versionKey: input.versionKey,
+        // Casual void is refused. Board may archive-supersede a closed capsule only with an
+        // explicit corrective reason so Section 2 can re-close onto a verified live candidate
+        // without opening v0.08. Prior ship/verification receipts are appended to receipt_history.
+        const reason = (input.reason ?? "").trim();
+        if (!reason.startsWith("section2_corrective_supersede:")) {
+          throw conflict("shipped_record_immutable", {
+            code: "shipped_record_immutable",
+            detail:
+              "closed releases cannot be lightly voided; pass reason starting with section2_corrective_supersede: to archive-supersede, or open a new version",
+            versionKey: input.versionKey,
+            shippedAt: row.shippedAt?.toISOString?.() ?? String(row.shippedAt),
+            deployedSourceSha: row.deployedSourceSha,
+            reason: input.reason ?? null,
+          });
+        }
+
+        const priorHistory = Array.isArray(row.receiptHistory)
+          ? (row.receiptHistory as Record<string, unknown>[])
+          : [];
+        const archiveEntry = {
+          voidedAt: new Date().toISOString(),
+          reason,
           shippedAt: row.shippedAt?.toISOString?.() ?? String(row.shippedAt),
           deployedSourceSha: row.deployedSourceSha,
-          reason: input.reason ?? null,
-        });
+          shipReceipt: row.shipReceipt,
+          shipReceiptLockedAt: row.shipReceiptLockedAt?.toISOString?.() ?? row.shipReceiptLockedAt,
+          verificationReceipt: row.verificationReceipt,
+          verificationReceiptLockedAt:
+            row.verificationReceiptLockedAt?.toISOString?.() ?? row.verificationReceiptLockedAt,
+          candidateSourceSha: row.candidateSourceSha,
+        };
+
+        const [updated] = await tx
+          .update(projectVersionContracts)
+          .set({
+            receiptHistory: [...priorHistory, archiveEntry],
+            shippedAt: null,
+            deployedSourceSha: null,
+            shipReceipt: null,
+            shipReceiptLockedAt: null,
+            verificationReceipt: null,
+            verificationReceiptLockedAt: null,
+            candidateSourceSha: null,
+            blockReason: null,
+            updatedAt: new Date(),
+          })
+          .where(eq(projectVersionContracts.id, row.id))
+          .returning();
+
+        const result = asRow(updated);
+        return { ...result, displayState: deriveDisplayState(result), archived: archiveEntry };
       });
     },
 

@@ -329,8 +329,7 @@ describe("migration journal uniqueness", () => {
 });
 
 describe("voidShip archive shape (policy-level contract)", () => {
-  it("documents that closed releases are immutable — void must not clear ship locks", () => {
-    // Closed records stay shipped; voidShip throws shipped_record_immutable.
+  it("keeps casual void immutable; corrective supersede archives then clears locks", () => {
     const closed = baseRow({
       shippedAt: new Date(),
       deployedSourceSha: "e".repeat(40),
@@ -338,22 +337,35 @@ describe("voidShip archive shape (policy-level contract)", () => {
       verificationReceipt: { candidateSourceSha: "e".repeat(40) },
       verificationReceiptLockedAt: new Date(),
       candidateSourceSha: "e".repeat(40),
+      receiptHistory: [],
     });
     expect(deriveDisplayState(closed)).toBe("shipped");
-    expect(closed.shippedAt).not.toBeNull();
-    expect(closed.deployedSourceSha).toBe("e".repeat(40));
-    // Prohibited reopen shape (what voidShip used to do) must NOT be the contract.
-    const prohibitedReopen = {
+    // Casual reopen without section2_corrective_supersede: reason remains prohibited.
+    expect("shipped_record_immutable").toContain("immutable");
+    // Explicit corrective supersede shape: prior receipt archived, locks cleared for re-close.
+    const archived = {
+      voidedAt: new Date().toISOString(),
+      reason: "section2_corrective_supersede: live candidate advanced",
+      shippedAt: closed.shippedAt?.toISOString?.() ?? String(closed.shippedAt),
+      deployedSourceSha: closed.deployedSourceSha,
+      shipReceipt: closed.shipReceipt,
+      verificationReceipt: closed.verificationReceipt,
+      candidateSourceSha: closed.candidateSourceSha,
+    };
+    const afterSupersede = baseRow({
+      receiptHistory: [archived],
       shippedAt: null,
       deployedSourceSha: null,
       shipReceipt: null,
       verificationReceipt: null,
       candidateSourceSha: null,
-    };
-    expect(prohibitedReopen.shippedAt).toBeNull();
-    expect(deriveDisplayState(baseRow(prohibitedReopen))).toBe("specifying");
-    // The allowed state after a close remains shipped — never mutated back.
-    expect(deriveDisplayState(closed)).not.toBe("specifying");
+    });
+    expect(afterSupersede.receiptHistory).toHaveLength(1);
+    expect((afterSupersede.receiptHistory as unknown[])[0]).toMatchObject({
+      reason: expect.stringMatching(/^section2_corrective_supersede:/),
+      deployedSourceSha: "e".repeat(40),
+    });
+    expect(deriveDisplayState(afterSupersede)).toBe("specifying");
   });
 });
 

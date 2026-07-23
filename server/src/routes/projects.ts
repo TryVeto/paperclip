@@ -341,13 +341,13 @@ export function projectRoutes(db: Db) {
     if (!project) return;
     assertBoard(req);
     try {
-      // voidShip never returns: closed capsules are immutable (shipped_record_immutable);
-      // unshipped capsules reject with version_not_shipped.
-      await versions.voidShip(project.id, {
+      // Casual void → shipped_record_immutable. Explicit section2_corrective_supersede:
+      // archives prior receipts into receipt_history and clears locks for re-verify/re-ship.
+      const result = await versions.voidShip(project.id, {
         versionKey: req.params.versionKey as string,
         reason: req.body.reason,
       });
-      res.status(500).json({ error: "void_ship_unreachable_success" });
+      res.json(result);
     } catch (err) {
       if (err instanceof HttpError) {
         res.status(err.status).json({ error: err.message, details: err.details });
