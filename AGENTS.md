@@ -5,20 +5,32 @@ Guidance for human and AI contributors working in this repository.
 ## 1. Purpose
 
 Paperclip is a control plane for AI-agent companies.
-The current implementation target is V1 and is defined in `doc/SPEC-implementation.md`.
+
+**Active version contract (v0.07):** Codex owns one canonical specification per
+version; Cursor owns every source, test, migration, and code-adjacent
+implementation change. Exact-SHA ship closure is required before the next
+version may open. Canonical v0.07 plan:
+`doc/plans/2026-07-22-paperclip-v0.07.md` (immutable blob
+`c9a2782c8e42c99d46729f54d4bc74bbe511a4e0` — do not edit that file).
+
+Long-horizon product context remains in `doc/SPEC.md`. Concrete control-plane
+behavior remains in `doc/SPEC-implementation.md`. When those conflict with the
+v0.07 version contract for ship/bootstrap/verification gates, the v0.07 plan
+and `project_version_contracts` runtime win.
 
 ## 2. Read This First
 
 Before making changes, read in this order:
 
-1. `doc/GOAL.md`
-2. `doc/PRODUCT.md`
-3. `doc/SPEC-implementation.md`
-4. `doc/DEVELOPING.md`
-5. `doc/DATABASE.md`
+1. `doc/plans/2026-07-22-paperclip-v0.07.md` (when working a versioned ship)
+2. `doc/GOAL.md`
+3. `doc/PRODUCT.md`
+4. `doc/SPEC-implementation.md`
+5. `doc/DEVELOPING.md`
+6. `doc/DATABASE.md`
 
 `doc/SPEC.md` is long-horizon product context.
-`doc/SPEC-implementation.md` is the concrete V1 build contract.
+`doc/SPEC-implementation.md` is the concrete control-plane build contract.
 
 ## 3. Repo Map
 
@@ -173,53 +185,30 @@ When creating a pull request (via `gh pr create` or any other method), you **mus
 
 A change is done when all are true:
 
-1. Behavior matches `doc/SPEC-implementation.md`
-2. Typecheck, tests, and build pass
+1. Behavior matches the governing contract (`doc/plans/2026-07-22-paperclip-v0.07.md`
+   for version-ship work; otherwise `doc/SPEC-implementation.md`)
+2. Typecheck, tests, and build pass for the touched surface
 3. Contracts are synced across db/shared/server/ui
 4. Docs updated when behavior or commands change
 5. PR description follows the [PR template](.github/PULL_REQUEST_TEMPLATE.md) with all sections filled in (including Model Used)
+6. For version close: candidate SHA resolves from a durable published Git object
+   store (not hex-equality alone); verification is server-observed Cursor
+   provenance with non-empty implementation descendants; shipped records are not
+   rewritten
 
-## 11. Fork-Specific: HenkDz/paperclip
+## 12. Hiring and agent instructions
 
-This is a fork of `paperclipai/paperclip` with QoL patches and a **built-in** Hermes adapter story on branch `feat/externalize-hermes-adapter` ([tree](https://github.com/HenkDz/paperclip/tree/feat/externalize-hermes-adapter)).
+- Board / operator hiring of new agents must use the `paperclip-create-agent`
+  skill (managed `instructionsBundle`), not a one-shot
+  `adapterConfig.systemPrompt` paste that the runtime ignores.
+- Agent instruction bundles are authoritative for heartbeat behavior; keep them
+  consistent with the Cursor-implementation / Codex-specification lane split.
 
-### Branch Strategy
+## 13. Fork history note (non-authoritative)
 
-- `feat/externalize-hermes-adapter` now ships `hermes_local` and `hermes_gateway` as built-in core adapters.
-- Older fork branches may still document plugin-only Hermes; treat this file as authoritative for the current branch.
-
-### Hermes (built-in)
-
-- `hermes_local` is available without Adapter manager installation and runs the local Hermes CLI.
-- `hermes_gateway` is available without Adapter manager installation and calls an already-running Hermes API server.
-- Operators may still install external Hermes packages through Adapter manager to override/shadow the built-ins.
-- Optional: `file:` entry in `~/.paperclip/adapter-plugins.json` remains useful for local development of override packages.
-
-### Local Dev
-
-- Fork runs on port 3101+ (auto-detects if 3100 is taken by upstream instance)
-- `npx vite build` hangs on NTFS — use `node node_modules/vite/bin/vite.js build` instead
-- Server startup from NTFS takes 30-60s — don't assume failure immediately
-- Kill ALL paperclip processes before starting: `pkill -f "paperclip"; pkill -f "tsx.*index.ts"`
-- Vite cache survives `rm -rf dist` — delete both: `rm -rf ui/dist ui/node_modules/.vite`
-
-### Fork QoL Patches (not in upstream)
-
-These are local modifications in the fork's UI. If re-copying source, these must be re-applied:
-
-1. **stderr_group** — amber accordion for MCP init noise in `RunTranscriptView.tsx`
-2. **tool_group** — accordion for consecutive non-terminal tools (write, read, search, browser)
-3. **Dashboard excerpt** — `LatestRunCard` strips markdown, shows first 3 lines/280 chars
-
-### Plugin System
-
-PR #2218 (`feat/external-adapter-phase1`) adds external adapter support. See root `AGENTS.md` for full details.
-
-- Adapters can be loaded as external plugins via `~/.paperclip/adapter-plugins.json`
-- The plugin-loader should have ZERO hardcoded adapter imports — pure dynamic loading
-- `createServerAdapter()` must include ALL optional fields (especially `detectModel`)
-- Built-in UI adapters can shadow external plugin parsers; external override pause/resume should restore the built-in parser.
-- Reference external adapters: Droid (npm); Hermes can also be tested as an override package.
+Older fork notes (Hermes adapter externalization, HenkDz QoL patches, NTFS
+dev quirks) may appear in git history. They are not the operating contract for
+v0.07 on veto-mainline. Prefer this file's sections 1–12 and the v0.07 plan.
 
 ## Design system
 

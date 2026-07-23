@@ -84,6 +84,21 @@ async function main() {
   ensureNoDuplicates(journalTags, "migration journal");
   ensureStrictlyOrdered(journalTags, "migration journal");
   ensureJournalMatchesFiles(migrationFiles, journalTags);
+
+  // Drizzle journal idx must be unique (SPEC-5 / Codex audit: reused idx 178).
+  const seenIdx = new Map<number, string>();
+  for (const [index, entry] of (journal.entries ?? []).entries()) {
+    if (typeof entry.idx !== "number" || !Number.isInteger(entry.idx)) {
+      throw new Error(`Migration journal entry ${index} is missing a numeric idx`);
+    }
+    const existing = seenIdx.get(entry.idx);
+    if (existing) {
+      throw new Error(
+        `Duplicate migration journal idx ${entry.idx}: ${existing}, ${entry.tag ?? `entry[${index}]`}`,
+      );
+    }
+    seenIdx.set(entry.idx, entry.tag ?? `entry[${index}]`);
+  }
 }
 
 await main();
