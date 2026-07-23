@@ -77,6 +77,15 @@ import {
 import { normalizeResponsibleUserDenialCode } from "./responsible-user-denial-run-outcomes.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import { getServerAdapter, listAdapterModelProfiles, runningProcesses } from "../adapters/index.js";
+import {
+  FAST_DECISION_ACTIONS,
+  FAST_DECISION_VERSION,
+  FastDecisionConfigError,
+  executeFastDecision,
+  resolveFastDecisionConfig,
+  type FastDecisionAction,
+  type FastDecisionFetch,
+} from "./fast-decision.js";
 import type {
   AdapterExecutionResult,
   AdapterInvocationMeta,
@@ -5391,6 +5400,8 @@ export interface HeartbeatServiceOptions {
   pluginWorkerManager?: PluginWorkerManager;
   environmentRuntime?: HeartbeatEnvironmentRuntime;
   runtimeEnv?: Record<string, string | undefined>;
+  fastDecisionFetch?: FastDecisionFetch;
+  fastDecisionAfterApply?: (runId: string) => Promise<void> | void;
 }
 
 function isTruthyRuntimeEnvValue(value: string | undefined) {
@@ -11795,6 +11806,1320 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
     }
   }
 
+
+  const FAST_DECISION_APPLY_LOST = new Error("fast decision apply lost ownership");
+
+  function publishRunStatusUpdate(updated: typeof heartbeatRuns.$inferSelect) {
+    if (isHeartbeatRunTerminalStatus(updated.status)) {
+      clearHeartbeatRunRuntimeStatus(updated.id);
+    }
+    publishLiveEvent({
+      companyId: updated.companyId,
+      type: "heartbeat.run.status",
+      payload: {
+        runId: updated.id,
+        agentId: updated.agentId,
+        status: updated.status,
+        invocationSource: updated.invocationSource,
+        triggerDetail: updated.triggerDetail,
+        error: updated.error ?? null,
+        errorCode: updated.errorCode ?? null,
+        startedAt: updated.startedAt ? new Date(updated.startedAt).toISOString() : null,
+        finishedAt: updated.finishedAt ? new Date(updated.finishedAt).toISOString() : null,
+      },
+    });
+    publishRunLifecyclePluginEvent(updated);
+  }
+
+  async function setFastDecisionTerminalStatusWithAccounting(input: any) {
+      await ensureRuntimeState(input.agent);
+      const inputTokens = input.usage.inputTokens ?? 0;
+      const outputTokens = input.usage.outputTokens ?? 0;
+      const cachedInputTokens = input.usage.cachedInputTokens ?? 0;
+      const billingType = normalizeLedgerBillingType(input.result.billingType);
+      const additionalCostCents = normalizeBilledCostCents(input.result.costUsd, billingType);
+      const hasTokenUsage = inputTokens > 0 || outputTokens > 0 || cachedInputTokens > 0;
+      const costStatus = resolveLedgerCostStatus({
+          costUsd: input.result.costUsd,
+          inputTokens,
+          cachedInputTokens,
+          outputTokens,
+      });
+      const provider = input.result.provider ?? "unknown";
+      const biller = resolveLedgerBiller(input.result);
+      const ledgerScope = await resolveLedgerScopeForRun(db, input.agent.companyId, input.run);
+      const terminalized = await db.transaction(async (tx) => {
+          await tx.execute(sql `select id from heartbeat_runs where id = ${input.run.id} for update`);
+          const currentRun = await tx
+              .select()
+              .from(heartbeatRuns)
+              .where(eq(heartbeatRuns.id, input.run.id))
+              .then((rows) => rows[0] ?? null);
+          const preservingExternalTerminal = Boolean(currentRun &&
+              input.allowExistingExternalTerminal &&
+              ["cancelled", "interrupted", "timed_out", "failed"].includes(currentRun.status));
+          if (!currentRun || (currentRun.status !== "running" && !preservingExternalTerminal)) {
+              return {
+                  run: currentRun,
+                  updated: false,
+                  costEvent: null,
+                  preservedExternalTerminal: false,
+              };
+          }
+          const effectiveStatus = preservingExternalTerminal ? currentRun.status : input.status;
+          await tx.execute(sql `select agent_id from agent_runtime_state where agent_id = ${input.agent.id} for update`);
+          const runtime = await tx
+              .select({ lastRunId: agentRuntimeState.lastRunId })
+              .from(agentRuntimeState)
+              .where(eq(agentRuntimeState.agentId, input.agent.id))
+              .then((rows) => rows[0] ?? null);
+          if (!runtime)
+              throw new Error(`Missing runtime state for fast-decision agent ${input.agent.id}`);
+          const runtimeLastRun = runtime.lastRunId && runtime.lastRunId !== currentRun.id
+              ? await tx
+                  .select({ id: heartbeatRuns.id, createdAt: heartbeatRuns.createdAt })
+                  .from(heartbeatRuns)
+                  .where(eq(heartbeatRuns.id, runtime.lastRunId))
+                  .then((rows) => rows[0] ?? null)
+              : null;
+          const runtimeHasNewerRun = Boolean(runtimeLastRun && runtimeLastRun.createdAt.getTime() >= currentRun.createdAt.getTime());
+          const existingCostEvent = hasTokenUsage || additionalCostCents > 0
+              ? await tx
+                  .select({ id: costEvents.id })
+                  .from(costEvents)
+                  .where(and(eq(costEvents.companyId, input.agent.companyId), eq(costEvents.heartbeatRunId, input.run.id)))
+                  .limit(1)
+                  .then((rows) => rows[0] ?? null)
+              : null;
+          // Runtime totals and the run-scoped cost event are committed together.
+          // Either durable marker proves this usage was already applied, even if a
+          // newer run has since advanced lastRunId.
+          const runtimeAlreadyAccounted = runtime.lastRunId === input.run.id || Boolean(existingCostEvent);
+          await tx
+              .update(agentRuntimeState)
+              .set({
+              ...(runtimeHasNewerRun
+                  ? {}
+                  : {
+                      adapterType: input.agent.adapterType,
+                      lastRunId: input.run.id,
+                      lastRunStatus: effectiveStatus,
+                      lastError: input.result.errorMessage ?? null,
+                  }),
+              ...(runtimeAlreadyAccounted
+                  ? {}
+                  : {
+                      totalInputTokens: sql `${agentRuntimeState.totalInputTokens} + ${inputTokens}`,
+                      totalOutputTokens: sql `${agentRuntimeState.totalOutputTokens} + ${outputTokens}`,
+                      totalCachedInputTokens: sql `${agentRuntimeState.totalCachedInputTokens} + ${cachedInputTokens}`,
+                      totalCostCents: sql `${agentRuntimeState.totalCostCents} + ${additionalCostCents}`,
+                  }),
+              updatedAt: new Date(),
+          })
+              .where(eq(agentRuntimeState.agentId, input.agent.id));
+          const [costEvent] = !existingCostEvent && (additionalCostCents > 0 || hasTokenUsage)
+              ? await tx
+                  .insert(costEvents)
+                  .values({
+                  companyId: input.agent.companyId,
+                  heartbeatRunId: input.run.id,
+                  agentId: input.agent.id,
+                  issueId: ledgerScope.issueId,
+                  projectId: ledgerScope.projectId,
+                  provider,
+                  biller,
+                  billingType,
+                  costStatus,
+                  model: input.result.model ?? "unknown",
+                  inputTokens,
+                  cachedInputTokens,
+                  outputTokens,
+                  costCents: additionalCostCents,
+                  occurredAt: new Date(),
+              })
+                  .returning()
+              : [null];
+          const requestedResultJson = parseObject(input.patch.resultJson);
+          const requestedMarker = parseObject(requestedResultJson.fastDecision);
+          const durableResultJson = {
+              ...(preservingExternalTerminal ? parseObject(currentRun.resultJson) : {}),
+              ...requestedResultJson,
+              fastDecision: {
+                  ...requestedMarker,
+                  terminalAccountingVersion: 1,
+                  finalizationPhase: "pending",
+                  ...(preservingExternalTerminal ? { externalTerminalStatus: currentRun.status } : {}),
+              },
+          };
+          const runPatch = preservingExternalTerminal
+              ? {
+                  resultJson: durableResultJson,
+                  usageJson: input.patch.usageJson,
+                  stdoutExcerpt: input.patch.stdoutExcerpt,
+                  stderrExcerpt: input.patch.stderrExcerpt,
+                  logBytes: input.patch.logBytes,
+                  logSha256: input.patch.logSha256,
+                  logCompressed: input.patch.logCompressed,
+              }
+              : { ...input.patch, resultJson: durableResultJson };
+          const updatedRun = await tx
+              .update(heartbeatRuns)
+              .set({ status: effectiveStatus, ...runPatch, updatedAt: new Date() })
+              .where(and(eq(heartbeatRuns.id, input.run.id), eq(heartbeatRuns.status, currentRun.status)))
+              .returning()
+              .then((rows) => rows[0] ?? null);
+          if (!updatedRun)
+              throw new Error(`Failed to terminalize fast-decision run ${input.run.id}`);
+          return {
+              run: updatedRun,
+              updated: true,
+              costEvent: costEvent ?? null,
+              preservedExternalTerminal: preservingExternalTerminal,
+          };
+      });
+      if (terminalized.updated && terminalized.run) {
+          if (!terminalized.preservedExternalTerminal)
+              publishRunStatusUpdate(terminalized.run);
+      }
+      return terminalized;
+  }
+  async function finalizeFastDecisionTerminalRun(run: any, agent: any) {
+      const resultJson = parseObject(run.resultJson);
+      const marker = parseObject(resultJson.fastDecision);
+      if (marker.version !== FAST_DECISION_VERSION ||
+          asNumber(marker.terminalAccountingVersion, 0) !== 1 ||
+          marker.finalizationPhase !== "pending") {
+          return;
+      }
+      const ownershipLost = marker.phase === "ownership_lost";
+      const cancelled = run.status === "cancelled";
+      const timedOut = run.status === "timed_out";
+      const failed = run.status === "failed";
+      const outcome = cancelled
+          ? "cancelled"
+          : timedOut
+              ? "timed_out"
+              : ownershipLost
+                  ? "interrupted"
+                  : failed
+                      ? "failed"
+                      : "succeeded";
+      const wakeStatus = cancelled ? "cancelled" : timedOut || failed ? "failed" : ownershipLost ? "cancelled" : "completed";
+      const lifecycleMessage = cancelled
+          ? "run cancelled"
+          : timedOut
+              ? "run timed out"
+              : ownershipLost
+                  ? (run.error ?? "Fast decision lost issue ownership before applying its result")
+                  : failed
+                      ? "run failed"
+                      : "run succeeded";
+      await setWakeupStatus(run.wakeupRequestId, wakeStatus, {
+          finishedAt: run.finishedAt ?? new Date(),
+          error: run.error ?? null,
+      });
+      const existingLifecycle = await db
+          .select({ id: heartbeatRunEvents.id })
+          .from(heartbeatRunEvents)
+          .where(and(eq(heartbeatRunEvents.runId, run.id), eq(heartbeatRunEvents.eventType, "lifecycle"), sql `${heartbeatRunEvents.payload}->>'runtime' = ${FAST_DECISION_VERSION}`, sql `${heartbeatRunEvents.payload} ? 'status'`))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+      if (!existingLifecycle) {
+          await appendRunEvent(run, await nextRunEventSeq(run.id), {
+              eventType: "lifecycle",
+              stream: "system",
+              level: cancelled ? "warn" : failed || timedOut || ownershipLost ? "error" : "info",
+              message: lifecycleMessage,
+              payload: { status: run.status, runtime: FAST_DECISION_VERSION },
+          });
+      }
+      await releaseIssueExecutionAndPromote(run, failed || timedOut || ownershipLost ? {} : { suppressImmediateRecovery: true });
+      const issueId = readNonEmptyString(marker.issueId);
+      if (!failed && !timedOut && !cancelled && !ownershipLost && marker.action === "comment_and_done" && issueId) {
+          await recovery.reconcileResolvedDependencyWakeBackstop({
+              runId: run.id,
+              companyId: run.companyId,
+              blockerIssueId: issueId,
+              source: "workspace.finalize",
+          });
+      }
+      const latestRuntimeRunId = await db
+          .select({ lastRunId: agentRuntimeState.lastRunId })
+          .from(agentRuntimeState)
+          .where(eq(agentRuntimeState.agentId, agent.id))
+          .then((rows) => rows[0]?.lastRunId ?? null);
+      if (!latestRuntimeRunId || latestRuntimeRunId === run.id) {
+          await finalizeAgentStatus(agent.id, outcome, run.error ?? null);
+      }
+      const ledgerEvent = await db
+          .select()
+          .from(costEvents)
+          .where(and(eq(costEvents.companyId, run.companyId), eq(costEvents.heartbeatRunId, run.id)))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+      if (ledgerEvent) {
+          try {
+              await budgets.evaluateCostEvent(ledgerEvent);
+          }
+          catch (error) {
+              // Accounting is already durable. Budget reconciliation must never
+              // prevent issue/wake/agent cleanup or strand a terminal fast run.
+              logger.error({ err: error, runId: run.id }, "fast-decision budget evaluation failed");
+          }
+      }
+      await db.transaction(async (tx) => {
+          await tx.execute(sql `select id from heartbeat_runs where id = ${run.id} for update`);
+          const current = await tx
+              .select({ resultJson: heartbeatRuns.resultJson })
+              .from(heartbeatRuns)
+              .where(eq(heartbeatRuns.id, run.id))
+              .then((rows) => rows[0] ?? null);
+          const currentResult = parseObject(current?.resultJson);
+          const currentMarker = parseObject(currentResult.fastDecision);
+          if (currentMarker.finalizationPhase !== "pending")
+              return;
+          await tx
+              .update(heartbeatRuns)
+              .set({
+              resultJson: {
+                  ...currentResult,
+                  fastDecision: {
+                      ...currentMarker,
+                      finalizationPhase: "complete",
+                      finalizedAt: new Date().toISOString(),
+                  },
+              },
+              updatedAt: new Date(),
+          })
+              .where(eq(heartbeatRuns.id, run.id));
+      });
+  }
+  function buildFastDecisionFallback(reason: string) {
+      return {
+          action: "escalate_slow",
+          comment: "This issue needs the configured slow path before Paperclip can safely finish it.",
+          reason,
+      };
+  }
+  async function findFastDecisionFallbackRun(companyId: string, fallbackAgentId: string, idempotencyKey: string) {
+      const wake = await db
+          .select({
+          id: agentWakeupRequests.id,
+          status: agentWakeupRequests.status,
+          runId: agentWakeupRequests.runId,
+      })
+          .from(agentWakeupRequests)
+          .where(and(eq(agentWakeupRequests.companyId, companyId), eq(agentWakeupRequests.agentId, fallbackAgentId), eq(agentWakeupRequests.idempotencyKey, idempotencyKey)))
+          .orderBy(asc(agentWakeupRequests.requestedAt))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+      if (!wake)
+          return null;
+      const fallbackRun = await db
+          .select()
+          .from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.companyId, companyId), eq(heartbeatRuns.agentId, fallbackAgentId), wake.runId
+          ? eq(heartbeatRuns.id, wake.runId)
+          : eq(heartbeatRuns.wakeupRequestId, wake.id)))
+          .orderBy(asc(heartbeatRuns.createdAt))
+          .limit(1)
+          .then((rows) => rows[0] ?? null);
+      return { wake, run: fallbackRun };
+  }
+  async function executeFastDecisionRun(run: typeof heartbeatRuns.$inferSelect, agent: typeof agents.$inferSelect): Promise<boolean> {
+      const fdId = (id: string | null | undefined): string => id as string;
+      const context = parseObject(run.contextSnapshot);
+      const persistedRunState = await db
+          .select({ status: heartbeatRuns.status, resultJson: heartbeatRuns.resultJson })
+          .from(heartbeatRuns)
+          .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId)))
+          .then((rows) => rows[0] ?? null);
+      const persistedResultJson = parseObject(persistedRunState?.resultJson);
+      const persistedMarker = parseObject(persistedResultJson.fastDecision);
+      const contextIssueId = readNonEmptyString(context.issueId);
+      const markerIssueId = readNonEmptyString(persistedMarker.issueId);
+      const persistedActionValue = readNonEmptyString(persistedMarker.action);
+      const persistedAction = persistedActionValue && (FAST_DECISION_ACTIONS as readonly string[]).includes(persistedActionValue)
+          ? (persistedActionValue as FastDecisionAction)
+          : null;
+      const hasAppliedMarker = persistedMarker.phase === "applied";
+      const markerFallbackValid = persistedAction !== "escalate_slow"
+          || Boolean((readNonEmptyString(persistedMarker.fallbackAgentId) &&
+              readNonEmptyString(persistedMarker.fallbackAgentId) !== agent.id)
+              || readNonEmptyString(persistedMarker.fallbackConfigurationError));
+      const resumingAppliedDecision = hasAppliedMarker
+          && persistedMarker.version === FAST_DECISION_VERSION
+          && Boolean(contextIssueId)
+          && markerIssueId === contextIssueId
+          && Boolean(persistedAction)
+          && markerFallbackValid;
+      if (hasAppliedMarker && !resumingAppliedDecision) {
+          const error = "Fast decision recovery marker has an invalid action";
+          const finishedAt = new Date();
+          const failed = await setRunStatusIfRunning(run.id, "failed", {
+              finishedAt,
+              error,
+              errorCode: "fast_decision_invalid_recovery_marker",
+              resultJson: persistedResultJson,
+          });
+          if (failed.updated && failed.run) {
+              await setWakeupStatus(run.wakeupRequestId, "failed", { finishedAt, error });
+              await releaseIssueExecutionAndPromote(failed.run);
+              await finalizeAgentStatus(agent.id, "failed", error);
+          }
+          return true;
+      }
+      let config = null;
+      let configError = null;
+      if (!resumingAppliedDecision) {
+          try {
+              config = resolveFastDecisionConfig(runtimeEnv, agent.id);
+          }
+          catch (error) {
+              if (!(error instanceof FastDecisionConfigError))
+                  throw error;
+              configError = error;
+          }
+      }
+      if (!config && !configError && !resumingAppliedDecision)
+          return false;
+      const terminalizePreModelOwnershipLoss = async (reason: string) => {
+          const finishedAt = new Date();
+          const interrupted = await setRunStatusIfRunning(run.id, "interrupted", {
+              finishedAt,
+              error: reason,
+              errorCode: "fast_decision_ownership_lost",
+              resultJson: persistedResultJson,
+          });
+          if (!interrupted.updated || !interrupted.run)
+              return;
+          await setWakeupStatus(run.wakeupRequestId, "cancelled", { finishedAt, error: reason });
+          await appendRunEvent(interrupted.run, await nextRunEventSeq(run.id), {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "warn",
+              message: reason,
+              payload: { runtime: FAST_DECISION_VERSION, phase: "checkout" },
+          });
+          await releaseIssueExecutionAndPromote(interrupted.run);
+          await finalizeAgentStatus(agent.id, "interrupted", reason);
+      };
+      let issueId = contextIssueId ?? markerIssueId;
+      const wakeReason = readNonEmptyString(context.wakeReason);
+      const triggerDetail = readNonEmptyString(context.triggerDetail);
+      const assignmentFastLaneWake = run.invocationSource === "assignment" &&
+          wakeReason === "issue_assigned";
+      // Thinking-fast never falls through to Cursor/workspace adapters.
+      // Allowlisted agent wakes are resolved entirely inside fast-decision-v1:
+      // empty inbox → server no_op; one actionable issue → Luna; ambiguous/deep → Thinking-slow.
+      const terminalizeFastLaneOnly = async (input: any) => {
+          const finishedAt = new Date();
+          const usage = { inputTokens: 0, cachedInputTokens: 0, outputTokens: 0 };
+          const action = input.action;
+          const resultJson = {
+              ...persistedResultJson,
+              summary: input.summary,
+              fastDecision: {
+                  version: FAST_DECISION_VERSION,
+                  phase: "applied",
+                  action,
+                  reason: input.reason,
+                  modelElapsedMs: 0,
+                  emptyInbox: Boolean(input.emptyInbox),
+                  inboxIssueCount: input.inboxIssueCount ?? null,
+                  issueId: input.issueId ?? null,
+                  fallbackRunId: input.fallbackRunId ?? null,
+                  cursorFallback: false,
+              },
+          };
+          const usageJson = {
+              inputTokens: 0,
+              cachedInputTokens: 0,
+              outputTokens: 0,
+              rawInputTokens: 0,
+              rawCachedInputTokens: 0,
+              rawOutputTokens: 0,
+              usageSource: "per_run",
+              provider: "none",
+              biller: "none",
+              model: "none",
+              billingType: "unknown",
+              costStatus: resolveLedgerCostStatus({
+                  costUsd: null,
+                  inputTokens: 0,
+                  cachedInputTokens: 0,
+                  outputTokens: 0,
+              }),
+              fastDecisionElapsedMs: 0,
+          };
+          await appendRunEvent(run, await nextRunEventSeq(run.id), {
+              eventType: "lifecycle",
+              stream: "system",
+              level: "info",
+              message: input.eventMessage,
+              payload: {
+                  runtime: FAST_DECISION_VERSION,
+                  phase: input.phase,
+                  action,
+                  issueId: input.issueId ?? null,
+              },
+          });
+          const finalized = await setFastDecisionTerminalStatusWithAccounting({
+              agent,
+              run,
+              status: "succeeded",
+              patch: {
+                  finishedAt,
+                  error: null,
+                  errorCode: null,
+                  exitCode: 0,
+                  usageJson,
+                  resultJson,
+                  stdoutExcerpt: `[${FAST_DECISION_VERSION}] ${action}: ${input.reason}`.slice(0, MAX_EXCERPT_BYTES),
+                  livenessState: action === "escalate_slow" ? "needs_followup" : "completed",
+                  livenessReason: input.summary,
+                  lastUsefulActionAt: finishedAt,
+                  nextAction: action === "escalate_slow" ? "Continue in the configured slow path." : null,
+              },
+              result: {
+                  exitCode: 0,
+                  signal: null,
+                  timedOut: false,
+                  errorMessage: null,
+                  usage,
+                  usageBasis: "per_run",
+                  provider: "none",
+                  biller: "none",
+                  model: "none",
+                  billingType: "unknown",
+                  resultJson,
+                  summary: input.summary,
+              },
+              usage,
+          });
+          if (finalized.updated && finalized.run) {
+              await finalizeFastDecisionTerminalRun(finalized.run, agent);
+          }
+          return true;
+      };
+      const enqueueThinkingSlow = async (opts: any) => {
+          const rawFallbackAgentId = readNonEmptyString(runtimeEnv.PAPERCLIP_FAST_DECISION_FALLBACK_AGENT_ID);
+          if (!rawFallbackAgentId || !isUuidLike(rawFallbackAgentId) || rawFallbackAgentId === agent.id) {
+              return { fallbackRunId: null, error: "fallback agent ID is invalid or missing" };
+          }
+          const fallbackAgent = await getAgent(rawFallbackAgentId);
+          const inv = fallbackAgent ? await getAgentInvokability(fallbackAgent) : { invokable: false, reason: "fallback agent missing" };
+          if (!fallbackAgent || fallbackAgent.companyId !== run.companyId || !inv.invokable) {
+              return { fallbackRunId: null, error: ("reason" in inv ? inv.reason : null) ?? "fallback agent not invokable" };
+          }
+          const idempotencyKey = `${FAST_DECISION_VERSION}:escalate:${run.id}`;
+          const existing = await findFastDecisionFallbackRun(run.companyId, fallbackAgent.id, idempotencyKey);
+          const fallbackRun = existing?.run ?? await enqueueWakeup(fallbackAgent.id, {
+              source: "automation",
+              triggerDetail: "system",
+              reason: "fast_decision_escalated",
+              payload: {
+                  issueId: opts.issueId ?? null,
+                  issueIds: opts.issueIds ?? null,
+                  sourceRunId: run.id,
+                  reason: opts.reason,
+              },
+              contextSnapshot: {
+                  ...(opts.issueId ? { issueId: opts.issueId } : {}),
+                  sourceRunId: run.id,
+                  wakeReason: "fast_decision_escalated",
+                  fastDecisionVersion: FAST_DECISION_VERSION,
+              },
+              idempotencyKey,
+              requestedByActorType: "agent",
+              requestedByActorId: agent.id,
+          });
+          return { fallbackRunId: fallbackRun?.id ?? null, error: fallbackRun?.id ? null : "failed to enqueue Thinking-slow" };
+      };
+      if (!resumingAppliedDecision && !issueId) {
+          const assigned = await db
+              .select({
+              id: issues.id,
+              status: issues.status,
+              title: issues.title,
+              updatedAt: issues.updatedAt,
+          })
+              .from(issues)
+              .where(and(eq(issues.companyId, agent.companyId), eq(issues.assigneeAgentId, agent.id), isNull(issues.assigneeUserId), isNull(issues.hiddenAt), inArray(issues.status, ["backlog", "todo", "in_progress"])))
+              .orderBy(desc(issues.updatedAt))
+              .limit(10);
+          if (assigned.length === 0) {
+              return await terminalizeFastLaneOnly({
+                  action: "no_op",
+                  reason: "No assigned actionable work; deterministic empty-inbox no-op",
+                  summary: "Empty inbox: no issue-bound work.",
+                  eventMessage: "empty inbox no-op",
+                  phase: "empty_inbox",
+                  emptyInbox: true,
+                  inboxIssueCount: 0,
+              });
+          }
+          if (assigned.length > 1) {
+              const handoffIssueId = assigned[0].id;
+              const escalated = await enqueueThinkingSlow({
+                  issueId: handoffIssueId,
+                  issueIds: assigned.map((row) => row.id),
+                  reason: `Ambiguous inbox: ${assigned.length} actionable assigned issues`,
+              });
+              return await terminalizeFastLaneOnly({
+                  action: "escalate_slow",
+                  reason: `Ambiguous inbox: ${assigned.length} actionable assigned issues`,
+                  summary: "Ambiguous inbox handed to Thinking-slow.",
+                  eventMessage: "ambiguous inbox escalate_slow",
+                  phase: "ambiguous_inbox",
+                  emptyInbox: false,
+                  inboxIssueCount: assigned.length,
+                  issueId: handoffIssueId,
+                  fallbackRunId: escalated.fallbackRunId,
+              });
+          }
+          issueId = assigned[0].id;
+          context.issueId = issueId;
+      }
+      // Allowlisted Thinking-fast: every wake with an issue stays in Luna lane.
+      let issue: any = await getIssueExecutionContext(agent.companyId, fdId(issueId));
+      if (!resumingAppliedDecision) {
+          const directLaneIssue = Boolean(issue &&
+              !issue.assigneeUserId &&
+              issue.assigneeAgentId === agent.id &&
+              ["backlog", "todo", "in_progress"].includes(issue.status));
+          if (!directLaneIssue) {
+              if (assignmentFastLaneWake) {
+                  await terminalizePreModelOwnershipLoss("Fast decision assignment lost eligible issue ownership before model execution");
+                  return true;
+              }
+              // Never Cursor: not-owned issue wakes finish as no_op.
+              return await terminalizeFastLaneOnly({
+                  action: "no_op",
+                  reason: "Wake issue is not owned by Thinking-fast; refusing Cursor fallthrough",
+                  summary: "No owned work for this wake.",
+                  eventMessage: "unowned issue no_op",
+                  phase: "unowned_issue",
+                  emptyInbox: false,
+                  issueId,
+              });
+          }
+          if (assignmentFastLaneWake && issue.executionRunId !== run.id) {
+              await terminalizePreModelOwnershipLoss("Fast decision run does not own the issue execution lock");
+              return true;
+          }
+      }
+      if (!resumingAppliedDecision) {
+          try {
+              await issuesSvc.checkout(fdId(issueId), agent.id, ["todo", "backlog"], run.id);
+              await logActivity(db, {
+                  companyId: run.companyId,
+                  actorType: "agent",
+                  actorId: agent.id,
+                  agentId: agent.id,
+                  runId: run.id,
+                  action: "issue.checked_out",
+                  entityType: "issue",
+                  entityId: fdId(issueId),
+                  issueId: fdId(issueId),
+                  details: {
+                      agentId: agent.id,
+                      status: "in_progress",
+                      source: FAST_DECISION_VERSION,
+                  },
+              });
+          }
+          catch (error) {
+              if (!isCheckoutConflictError(error))
+                  throw error;
+              await terminalizePreModelOwnershipLoss("Fast decision lost issue ownership during checkout");
+              return true;
+          }
+          issue = await getIssueExecutionContext(agent.companyId, fdId(issueId));
+          if (!issue ||
+              issue.status !== "in_progress" ||
+              issue.assigneeAgentId !== agent.id ||
+              issue.checkoutRunId !== run.id ||
+              issue.executionRunId !== run.id) {
+              await terminalizePreModelOwnershipLoss("Fast decision lost issue ownership immediately after checkout");
+              return true;
+          }
+      }
+      if (!issue) {
+          const error = "Fast decision recovery could not find its issue";
+          const finishedAt = new Date();
+          const failed = await setRunStatusIfRunning(run.id, "failed", {
+              finishedAt,
+              error,
+              errorCode: "fast_decision_issue_missing",
+              resultJson: persistedResultJson,
+          });
+          if (failed.updated && failed.run) {
+              await setWakeupStatus(run.wakeupRequestId, "failed", { finishedAt, error });
+              await releaseIssueExecutionAndPromote(failed.run);
+              await finalizeAgentStatus(agent.id, "failed", error);
+          }
+          return true;
+      }
+      const runningAgent = resumingAppliedDecision
+          ? agent
+          : await db
+              .update(agents)
+              .set({ status: "running", updatedAt: new Date() })
+              .where(and(eq(agents.id, agent.id), notInArray(agents.status, [...DIRECT_NON_INVOKABLE_STATUSES])))
+              .returning()
+              .then((rows) => rows[0] ?? null);
+      if (!runningAgent) {
+          const abortReason = "Cancelled: agent not invokable at fast-decision start";
+          const cancelled = await setRunStatusIfRunning(run.id, "cancelled", {
+              finishedAt: new Date(),
+              error: abortReason,
+              errorCode: "agent_not_invokable",
+          });
+          if (cancelled.updated && cancelled.run) {
+              await setWakeupStatus(run.wakeupRequestId, "cancelled", {
+                  finishedAt: new Date(),
+                  error: abortReason,
+              });
+              await releaseIssueExecutionAndPromote(cancelled.run);
+          }
+          return true;
+      }
+      publishLiveEvent({
+          companyId: runningAgent.companyId,
+          type: "agent.status",
+          payload: {
+              agentId: runningAgent.id,
+              status: runningAgent.status,
+              outcome: "running",
+          },
+      });
+      let seq = await nextRunEventSeq(run.id);
+      await appendRunEvent(run, seq++, {
+          eventType: "lifecycle",
+          stream: "system",
+          level: "info",
+          message: resumingAppliedDecision ? "run recovery resumed" : "run started",
+          payload: { runtime: FAST_DECISION_VERSION },
+      });
+      await appendRunEvent(run, seq++, {
+          eventType: resumingAppliedDecision ? "fast_decision.resume" : "fast_decision.invoke",
+          stream: "system",
+          level: "info",
+          message: resumingAppliedDecision ? "fast decision finalization resumed" : "fast decision invoked",
+          payload: {
+              version: FAST_DECISION_VERSION,
+              issueId,
+              model: config?.model ?? null,
+          },
+      });
+      let logHandle = null;
+      let logSummary = null;
+      try {
+          if (run.logStore === "local_file" && run.logRef) {
+              logHandle = { store: "local_file", logRef: run.logRef } as any;
+          }
+          else {
+              logHandle = await runLogStore.begin({
+                  companyId: run.companyId,
+                  agentId: run.agentId,
+                  runId: run.id,
+              });
+              await db
+                  .update(heartbeatRuns)
+                  .set({ logStore: logHandle.store, logRef: logHandle.logRef, updatedAt: new Date() })
+                  .where(eq(heartbeatRuns.id, run.id));
+          }
+          await runLogStore.append(logHandle, {
+              stream: "system",
+              chunk: `[${FAST_DECISION_VERSION}] one-shot decision ${resumingAppliedDecision ? "resumed" : "started"}\n`,
+              ts: new Date().toISOString(),
+              seq: 1,
+          });
+      }
+      catch (error) {
+          logger.warn({ err: error, runId: run.id }, "failed to initialize fast-decision run log");
+          logHandle = null;
+      }
+      const latestComment = resumingAppliedDecision
+          ? null
+          : await db
+              .select({ body: issueComments.body })
+              .from(issueComments)
+              .where(and(eq(issueComments.companyId, run.companyId), eq(issueComments.issueId, fdId(issueId)), isNull(issueComments.deletedAt)))
+              .orderBy(desc(issueComments.createdAt))
+              .limit(1)
+              .then((rows) => rows[0]?.body ?? null);
+      let modelResult = null;
+      let decision;
+      if (resumingAppliedDecision && persistedAction) {
+          decision = {
+              action: persistedAction,
+              comment: readNonEmptyString(persistedResultJson.summary) ?? "",
+              reason: readNonEmptyString(persistedMarker.reason) ?? "Recovered applied fast decision",
+          };
+      }
+      else if (configError) {
+          decision = buildFastDecisionFallback(`fast decision configuration error: ${configError.code}`);
+      }
+      else {
+          modelResult = await executeFastDecision(config!, {
+              issueTitle: issue.title,
+              issueBody: issue.description,
+              latestComment,
+              wakeReason: readNonEmptyString(context.wakeReason) ?? run.invocationSource,
+          }, { fetchImpl: options.fastDecisionFetch });
+          decision = modelResult.ok
+              ? modelResult.decision
+              : buildFastDecisionFallback(`fast decision ${modelResult.code}: ${modelResult.message}`);
+      }
+      // An active owned issue cannot be left in-progress without a live executor.
+      // Treat model no-op as uncertainty and hand it to the slow lane exactly once.
+      if (decision.action === "no_op") {
+          decision = buildFastDecisionFallback("fast decision returned no_op for an active owned issue");
+      }
+      const rawFallbackAgentId = readNonEmptyString(runtimeEnv.PAPERCLIP_FAST_DECISION_FALLBACK_AGENT_ID);
+      const rawFallbackRejectedByConfig = configError?.code === "fallback_agent_id_invalid"
+          || configError?.code === "fallback_agent_id_missing";
+      const fallbackAgentId = readNonEmptyString(persistedMarker.fallbackAgentId)
+          ?? config?.fallbackAgentId
+          ?? (rawFallbackRejectedByConfig ? null : rawFallbackAgentId);
+      let fallbackAgent = null;
+      let fallbackConfigurationError = resumingAppliedDecision
+          ? readNonEmptyString(persistedMarker.fallbackConfigurationError)
+          : null;
+      if (decision.action === "escalate_slow") {
+          const fallbackIdValid = Boolean(fallbackAgentId &&
+              isUuidLike(fallbackAgentId) &&
+              fallbackAgentId !== agent.id);
+          if (!fallbackIdValid) {
+              fallbackConfigurationError ??= fallbackAgentId === agent.id
+                  ? "fallback agent cannot be the fast agent"
+                  : "fallback agent ID is invalid or missing";
+          }
+          fallbackAgent = fallbackIdValid ? await getAgent(fallbackAgentId!) : null;
+          const fallbackInvokability = fallbackAgent
+              ? await getAgentInvokability(fallbackAgent)
+              : { invokable: false, reason: "fallback agent missing" };
+          if (!fallbackAgent ||
+              fallbackAgent.companyId !== run.companyId ||
+              !fallbackInvokability.invokable) {
+              fallbackConfigurationError ??= !fallbackAgent
+                  ? "fallback agent missing"
+                  : fallbackAgent.companyId !== run.companyId
+                      ? "fallback agent belongs to another company"
+                      : fallbackInvokability.invokable
+                          ? "fallback agent is not invokable"
+                          : fallbackInvokability.reason;
+              if (!fallbackAgent || fallbackAgent.companyId !== run.companyId) {
+                  fallbackAgent = null;
+              }
+          }
+      }
+      const decisionComment = decision.comment.trim() || (decision.action === "backlog"
+          ? `Returned to backlog: ${decision.reason}`
+          : decision.action === "escalate_slow"
+              ? `Escalated to the configured slow path: ${decision.reason}`
+              : "");
+      const persistedUsage = parseObject(persistedMarker.usage);
+      const accountedUsage = modelResult?.usage ?? {
+          inputTokens: Math.max(0, Math.floor(asNumber(persistedUsage.inputTokens, 0))),
+          cachedInputTokens: Math.max(0, Math.floor(asNumber(persistedUsage.cachedInputTokens, 0))),
+          outputTokens: Math.max(0, Math.floor(asNumber(persistedUsage.outputTokens, 0))),
+      };
+      const accountingModel = modelResult?.model
+          ?? readNonEmptyString(persistedMarker.model)
+          ?? config?.model
+          ?? "unknown";
+      const accountingProvider = readNonEmptyString(persistedMarker.provider)
+          ?? config?.provider
+          ?? "unknown";
+      const accountingBiller = readNonEmptyString(persistedMarker.biller)
+          ?? config?.biller
+          ?? accountingProvider;
+      const accountingBillingType = readNonEmptyString(persistedMarker.billingType)
+          ?? config?.billingType
+          ?? "unknown";
+      const appliedAt = new Date();
+      const applied = await db.transaction(async (tx) => {
+          // Match the issue-scoped wake path's lock order (issue before run). The
+          // final run CAS below rolls this transaction back if cancellation wins.
+          await tx.execute(sql `
+      select id from issues
+      where id = ${issueId} and company_id = ${run.companyId}
+      for update
+    `);
+          const lockedRun = await tx
+              .select({ status: heartbeatRuns.status, resultJson: heartbeatRuns.resultJson })
+              .from(heartbeatRuns)
+              .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.companyId, run.companyId)))
+              .then((rows) => rows[0] ?? null);
+          if (!lockedRun || lockedRun.status !== "running")
+              return { kind: "lost" };
+          const existingMarker = parseObject(parseObject(lockedRun.resultJson).fastDecision);
+          if (existingMarker.phase === "applied") {
+              return {
+                  kind: "duplicate",
+                  resultJson: parseObject(lockedRun.resultJson),
+                  commentId: readNonEmptyString(existingMarker.commentId),
+                  commentCreated: false,
+                  previousStatus: issue.status,
+                  nextStatus: readNonEmptyString(existingMarker.issueStatus) ?? issue.status,
+              };
+          }
+          const lockedIssue: any = await tx
+              .select()
+              .from(issues)
+              .where(and(eq(issues.id, fdId(issueId)), eq(issues.companyId, run.companyId)))
+              .then((rows) => rows[0] ?? null);
+          if (!lockedIssue ||
+              lockedIssue.assigneeAgentId !== agent.id ||
+              lockedIssue.executionRunId !== run.id) {
+              return { kind: "lost" };
+          }
+          let comment = await tx
+              .select({ id: issueComments.id, body: issueComments.body })
+              .from(issueComments)
+              .where(and(eq(issueComments.companyId, run.companyId), eq(issueComments.issueId, fdId(issueId)), eq(issueComments.createdByRunId, run.id), isNull(issueComments.deletedAt)))
+              .orderBy(asc(issueComments.createdAt))
+              .limit(1)
+              .then((rows) => rows[0] ?? null);
+          let commentCreated = false;
+          if (!comment && decisionComment) {
+              comment = await issuesSvc.addComment(fdId(issueId), decisionComment, { agentId: agent.id, runId: run.id }, undefined, tx as any);
+              commentCreated = true;
+          }
+          const nextStatus = decision.action === "comment_and_done"
+              ? "done"
+              : decision.action === "backlog"
+                  ? "backlog"
+                  : decision.action === "escalate_slow" && fallbackAgent && !fallbackConfigurationError
+                      ? "in_progress"
+                      : lockedIssue.status;
+          const issuePatch: any = {
+              status: nextStatus,
+              actorAgentId: agent.id,
+          };
+          if (decision.action === "backlog") {
+              issuePatch.assigneeAgentId = null;
+              issuePatch.assigneeUserId = null;
+          }
+          else if (decision.action === "escalate_slow" && fallbackAgent && !fallbackConfigurationError) {
+              issuePatch.assigneeAgentId = fallbackAgent.id;
+              issuePatch.assigneeUserId = null;
+          }
+          const updatedIssue = await issuesSvc.update(fdId(issueId), issuePatch, tx as any);
+          if (!updatedIssue)
+              throw FAST_DECISION_APPLY_LOST;
+          const resultJson = {
+              ...parseObject(lockedRun.resultJson),
+              summary: decisionComment || decision.reason,
+              nextAction: decision.action === "escalate_slow" && !fallbackConfigurationError
+                  ? "Continue in the configured slow path."
+                  : null,
+              fastDecision: {
+                  version: FAST_DECISION_VERSION,
+                  phase: "applied",
+                  action: decision.action,
+                  reason: decision.reason,
+                  commentId: comment?.id ?? null,
+                  issueId,
+                  issueStatus: nextStatus,
+                  fallbackAgentId: fallbackAgent?.id ?? fallbackAgentId ?? null,
+                  fallbackConfigurationError,
+                  model: accountingModel,
+                  provider: accountingProvider,
+                  biller: accountingBiller,
+                  billingType: accountingBillingType,
+                  usage: accountedUsage,
+                  modelElapsedMs: modelResult?.elapsedMs ?? 0,
+                  responseId: modelResult?.responseId ?? readNonEmptyString(persistedMarker.responseId) ?? null,
+                  modelErrorCode: modelResult && !modelResult.ok ? modelResult.code : null,
+                  configErrorCode: configError?.code ?? null,
+                  appliedAt: appliedAt.toISOString(),
+              },
+          };
+          const markerPersisted = await tx
+              .update(heartbeatRuns)
+              .set({
+              resultJson,
+              issueCommentStatus: comment ? "satisfied" : "not_applicable",
+              issueCommentSatisfiedByCommentId: comment?.id ?? null,
+              updatedAt: appliedAt,
+          })
+              .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "running")))
+              .returning({ id: heartbeatRuns.id })
+              .then((rows) => rows[0] ?? null);
+          if (!markerPersisted)
+              throw FAST_DECISION_APPLY_LOST;
+          if (comment?.id && commentCreated) {
+              await logActivity(tx as any, {
+                  companyId: run.companyId,
+                  actorType: "agent",
+                  actorId: agent.id,
+                  agentId: agent.id,
+                  runId: run.id,
+                  action: "issue.comment_added",
+                  entityType: "issue",
+                  entityId: fdId(issueId),
+                  issueId: fdId(issueId),
+                  details: {
+                      commentId: comment.id,
+                      bodySnippet: decisionComment.slice(0, 120),
+                      identifier: issue.identifier,
+                      issueTitle: issue.title,
+                      source: FAST_DECISION_VERSION,
+                  },
+              });
+          }
+          if (lockedIssue.status !== nextStatus || decision.action === "escalate_slow") {
+              await logActivity(tx as any, {
+                  companyId: run.companyId,
+                  actorType: "agent",
+                  actorId: agent.id,
+                  agentId: agent.id,
+                  runId: run.id,
+                  action: "issue.updated",
+                  entityType: "issue",
+                  entityId: fdId(issueId),
+                  issueId: fdId(issueId),
+                  details: {
+                      status: nextStatus,
+                      identifier: issue.identifier,
+                      source: FAST_DECISION_VERSION,
+                      action: decision.action,
+                      _previous: { status: lockedIssue.status },
+                      assigneeAgentId: updatedIssue.assigneeAgentId ?? null,
+                      assigneeUserId: updatedIssue.assigneeUserId ?? null,
+                  },
+              });
+          }
+          return {
+              kind: "applied",
+              resultJson,
+              commentId: comment?.id ?? null,
+              commentCreated,
+              previousStatus: lockedIssue.status,
+              nextStatus,
+          };
+      }).catch((error) => {
+          if (error === FAST_DECISION_APPLY_LOST)
+              return { kind: "lost" };
+          throw error;
+      });
+      if (applied.kind === "applied") {
+          await options.fastDecisionAfterApply?.(run.id);
+      }
+      if (applied.kind === "lost") {
+          logger.info({ runId: run.id }, "fast-decision apply lost run or issue ownership");
+          const error = "Fast decision lost issue ownership before applying its result";
+          const finishedAt = new Date();
+          const ownershipBillingType = normalizeLedgerBillingType(accountingBillingType);
+          const ownershipResultJson = {
+              ...persistedResultJson,
+              summary: error,
+              fastDecision: {
+                  ...persistedMarker,
+                  version: FAST_DECISION_VERSION,
+                  phase: "ownership_lost",
+                  action: decision.action,
+                  reason: decision.reason,
+                  issueId,
+                  model: accountingModel,
+                  provider: accountingProvider,
+                  biller: accountingBiller,
+                  billingType: ownershipBillingType,
+                  usage: accountedUsage,
+                  modelElapsedMs: modelResult?.elapsedMs ?? 0,
+              },
+          };
+          const ownershipUsageJson = {
+              inputTokens: accountedUsage.inputTokens,
+              cachedInputTokens: accountedUsage.cachedInputTokens,
+              outputTokens: accountedUsage.outputTokens,
+              rawInputTokens: accountedUsage.inputTokens,
+              rawCachedInputTokens: accountedUsage.cachedInputTokens,
+              rawOutputTokens: accountedUsage.outputTokens,
+              usageSource: "per_run",
+              provider: accountingProvider,
+              biller: accountingBiller,
+              model: accountingModel,
+              billingType: ownershipBillingType,
+              costStatus: resolveLedgerCostStatus({
+                  costUsd: null,
+                  inputTokens: accountedUsage.inputTokens,
+                  cachedInputTokens: accountedUsage.cachedInputTokens,
+                  outputTokens: accountedUsage.outputTokens,
+              }),
+              fastDecisionElapsedMs: modelResult?.elapsedMs ?? 0,
+          };
+          if (logHandle) {
+              try {
+                  await runLogStore.append(logHandle, {
+                      stream: "stderr",
+                      chunk: `[${FAST_DECISION_VERSION}] ${error}\n`,
+                      ts: finishedAt.toISOString(),
+                      seq: 2,
+                  });
+                  logSummary = await runLogStore.finalize(logHandle);
+              }
+              catch (logError) {
+                  logger.warn({ err: logError, runId: run.id }, "failed to finalize ownership-loss fast-decision log");
+              }
+          }
+          const interrupted = await setFastDecisionTerminalStatusWithAccounting({
+              agent,
+              run,
+              status: "interrupted",
+              patch: {
+                  finishedAt,
+                  error,
+                  errorCode: "fast_decision_ownership_lost",
+                  resultJson: ownershipResultJson,
+                  usageJson: ownershipUsageJson,
+                  logBytes: logSummary?.bytes,
+                  logSha256: logSummary?.sha256,
+                  logCompressed: logSummary?.compressed ?? false,
+              },
+              result: {
+                  exitCode: null,
+                  signal: null,
+                  timedOut: false,
+                  errorMessage: error,
+                  usage: accountedUsage,
+                  usageBasis: "per_run",
+                  provider: accountingProvider,
+                  biller: accountingBiller,
+                  model: accountingModel,
+                  billingType: ownershipBillingType,
+                  resultJson: ownershipResultJson,
+                  summary: error,
+              },
+              usage: accountedUsage,
+              allowExistingExternalTerminal: true,
+          });
+          if (interrupted.updated && interrupted.run) {
+              if (!interrupted.preservedExternalTerminal) {
+                  await finalizeFastDecisionTerminalRun(interrupted.run, agent);
+              }
+          }
+          return true;
+      }
+      let fallbackRunId = null;
+      let fallbackEnqueueError = fallbackConfigurationError;
+      if (decision.action === "escalate_slow" && fallbackAgent && !fallbackConfigurationError) {
+          const idempotencyKey = `${FAST_DECISION_VERSION}:escalate:${run.id}`;
+          try {
+              const existing = await findFastDecisionFallbackRun(run.companyId, fallbackAgent.id, idempotencyKey);
+              const fallbackRun = existing?.run ?? await enqueueWakeup(fallbackAgent.id, {
+                  source: "automation",
+                  triggerDetail: "system",
+                  reason: "fast_decision_escalated",
+                  payload: { issueId, sourceRunId: run.id, reason: decision.reason },
+                  contextSnapshot: {
+                      issueId,
+                      sourceRunId: run.id,
+                      wakeReason: "fast_decision_escalated",
+                      fastDecisionVersion: FAST_DECISION_VERSION,
+                  },
+                  idempotencyKey,
+                  requestedByActorType: "agent",
+                  requestedByActorId: agent.id,
+                });
+              fallbackRunId = fallbackRun?.id ?? null;
+              if (!fallbackRunId) {
+                  fallbackEnqueueError = existing
+                      ? `existing fallback wake is ${existing.wake.status} without a run`
+                      : "fallback wake was not queued";
+              }
+          }
+          catch (error) {
+              // enqueueWakeup commits the deterministic wake/run before attempting
+              // to start it. A post-commit start error must recover that durable
+              // successor rather than restoring ownership and creating a duplicate.
+              const committed = await findFastDecisionFallbackRun(run.companyId, fallbackAgent.id, idempotencyKey)
+                  .catch(() => null);
+              fallbackRunId = committed?.run?.id ?? null;
+              if (!fallbackRunId) {
+                  fallbackEnqueueError = error instanceof Error ? error.message : "fallback wake failed";
+              }
+          }
+      }
+      let resultJson: any = (applied as any).resultJson;
+      if (fallbackRunId || fallbackEnqueueError) {
+          const marker = parseObject(resultJson.fastDecision);
+          resultJson = {
+              ...resultJson,
+              fastDecision: {
+                  ...marker,
+                  fallbackRunId,
+                  fallbackEnqueueError,
+              },
+          };
+          await db
+              .update(heartbeatRuns)
+              .set({ resultJson, updatedAt: new Date() })
+              .where(and(eq(heartbeatRuns.id, run.id), eq(heartbeatRuns.status, "running")));
+      }
+      if (fallbackEnqueueError && fallbackAgent) {
+          // The apply transaction moved ownership to the slow agent before enqueue.
+          // If enqueue fails, restore the checked-out source issue only when that
+          // exact handoff state is still present, so recovery can durably own it.
+          await db.transaction(async (tx) => {
+              await tx.execute(sql `
+        select id from issues
+        where id = ${issueId} and company_id = ${run.companyId}
+        for update
+      `);
+              const currentIssue: any = await tx
+                  .select()
+                  .from(issues)
+                  .where(and(eq(issues.id, fdId(issueId)), eq(issues.companyId, run.companyId)))
+                  .then((rows) => rows[0] ?? null);
+              if (!currentIssue ||
+                  currentIssue.status !== "in_progress" ||
+                  currentIssue.assigneeAgentId !== fallbackAgent.id ||
+                  currentIssue.executionRunId) {
+                  return;
+              }
+              const restoredAt = new Date();
+              await tx
+                  .update(issues)
+                  .set({
+                  status: "in_progress",
+                  assigneeAgentId: agent.id,
+                  assigneeUserId: null,
+                  checkoutRunId: run.id,
+                  executionRunId: run.id,
+                  startedAt: currentIssue.startedAt ?? restoredAt,
+                  updatedAt: restoredAt,
+              })
+                  .where(and(eq(issues.id, fdId(issueId)), eq(issues.status, "in_progress"), eq(issues.assigneeAgentId, fallbackAgent.id), isNull(issues.executionRunId)));
+              await logActivity(tx as any, {
+                  companyId: run.companyId,
+                  actorType: "system",
+                  actorId: "heartbeat",
+                  agentId: agent.id,
+                  runId: run.id,
+                  action: "issue.updated",
+                  entityType: "issue",
+                  entityId: fdId(issueId),
+                  issueId: fdId(issueId),
+                  details: {
+                      status: "in_progress",
+                      source: FAST_DECISION_VERSION,
+                      reason: "fallback_enqueue_failed_recovery",
+                      _previous: { status: currentIssue.status },
+                      assigneeAgentId: agent.id,
+                  },
+              });
+          });
+      }
+      await appendRunEvent(run, seq++, {
+          eventType: "fast_decision.result",
+          stream: "system",
+          level: fallbackEnqueueError ? "error" : "info",
+          message: fallbackEnqueueError ? "fast decision fallback failed" : `fast decision: ${decision.action}`,
+          payload: {
+              version: FAST_DECISION_VERSION,
+              action: decision.action,
+              reason: decision.reason,
+              model: accountingModel,
+              modelElapsedMs: modelResult?.elapsedMs ?? asNumber(persistedMarker.modelElapsedMs, 0),
+              fallbackRunId,
+              fallbackEnqueueError,
+          },
+      });
+      if (logHandle) {
+          try {
+              await runLogStore.append(logHandle, {
+                  stream: fallbackEnqueueError ? "stderr" : "system",
+                  chunk: `[${FAST_DECISION_VERSION}] ${decision.action}: ${decision.reason}\n`,
+                  ts: new Date().toISOString(),
+                  seq: 2,
+              });
+              logSummary = await runLogStore.finalize(logHandle);
+          }
+          catch (error) {
+              logger.warn({ err: error, runId: run.id }, "failed to finalize fast-decision run log");
+          }
+      }
+      const usage = accountedUsage;
+      const model = accountingModel;
+      const billingType = normalizeLedgerBillingType(accountingBillingType);
+      const failed = Boolean(fallbackEnqueueError);
+      const finishedAt = new Date();
+      const usageJson = {
+          inputTokens: usage.inputTokens,
+          cachedInputTokens: usage.cachedInputTokens,
+          outputTokens: usage.outputTokens,
+          rawInputTokens: usage.inputTokens,
+          rawCachedInputTokens: usage.cachedInputTokens,
+          rawOutputTokens: usage.outputTokens,
+          usageSource: "per_run",
+          provider: accountingProvider,
+          biller: accountingBiller,
+          model,
+          billingType,
+          costStatus: resolveLedgerCostStatus({
+              costUsd: null,
+              inputTokens: usage.inputTokens,
+              cachedInputTokens: usage.cachedInputTokens,
+              outputTokens: usage.outputTokens,
+          }),
+          fastDecisionElapsedMs: modelResult?.elapsedMs ?? asNumber(persistedMarker.modelElapsedMs, 0),
+      };
+      const accountingResult = {
+          exitCode: failed ? null : 0,
+          signal: null,
+          timedOut: false,
+          errorMessage: fallbackEnqueueError,
+          usage,
+          usageBasis: "per_run",
+          provider: accountingProvider,
+          biller: accountingBiller,
+          model,
+          billingType,
+          resultJson,
+          summary: decisionComment || decision.reason,
+      };
+      const finalized = await setFastDecisionTerminalStatusWithAccounting({
+          agent,
+          run,
+          status: failed ? "failed" : "succeeded",
+          patch: {
+              finishedAt,
+              error: fallbackEnqueueError,
+              errorCode: failed ? CONFIGURATION_INCOMPLETE_FAILURE_CODE : null,
+              exitCode: failed ? null : 0,
+              usageJson,
+              resultJson,
+              stdoutExcerpt: `[${FAST_DECISION_VERSION}] ${decision.action}: ${decision.reason}`.slice(0, MAX_EXCERPT_BYTES),
+              logBytes: logSummary?.bytes,
+              logSha256: logSummary?.sha256,
+              logCompressed: logSummary?.compressed ?? false,
+              livenessState: failed
+                  ? "failed"
+                  : decision.action === "escalate_slow"
+                      ? "needs_followup"
+                      : "completed",
+              livenessReason: failed
+                  ? `fast decision fallback failed: ${fallbackEnqueueError}`
+                  : `fast decision applied ${decision.action}`,
+              lastUsefulActionAt: appliedAt,
+              nextAction: decision.action === "escalate_slow" && !failed
+                  ? "Continue in the configured slow path."
+                  : null,
+          },
+          result: accountingResult,
+          usage,
+      });
+      if (!finalized.updated || !finalized.run)
+          return true;
+      await finalizeFastDecisionTerminalRun(finalized.run, agent);
+      return true;
+  }
+
   async function executeRun(runId: string) {
     if ((await getSchedulingSuppression()).suppressed) return;
 
@@ -11828,6 +13153,46 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
       });
       const failedRun = await getRun(runId);
       if (failedRun) await releaseIssueExecutionAndPromote(failedRun);
+      return;
+    }
+
+    if (await executeFastDecisionRun(run, agent)) return;
+    // Thinking-fast must never reach Cursor/workspace adapters.
+    try {
+      const denyConfig = resolveFastDecisionConfig(runtimeEnv, agent.id);
+      if (denyConfig) {
+        const finishedAt = new Date();
+        const denied = await setRunStatusIfRunning(run.id, "failed", {
+          finishedAt,
+          error: "Thinking-fast refused Cursor fallthrough; fast-decision lane must handle this wake",
+          errorCode: "fast_decision_cursor_fallthrough_denied",
+        });
+        if (denied.updated && denied.run) {
+          await setWakeupStatus(run.wakeupRequestId, "failed", {
+            finishedAt,
+            error: denied.run.error,
+          });
+          await releaseIssueExecutionAndPromote(denied.run);
+          await finalizeAgentStatus(agent.id, "failed", denied.run.error);
+        }
+        return;
+      }
+    } catch (error) {
+      if (!(error instanceof FastDecisionConfigError)) throw error;
+      const finishedAt = new Date();
+      const denied = await setRunStatusIfRunning(run.id, "failed", {
+        finishedAt,
+        error: `Thinking-fast refused Cursor fallthrough (${error.code})`,
+        errorCode: "fast_decision_cursor_fallthrough_denied",
+      });
+      if (denied.updated && denied.run) {
+        await setWakeupStatus(run.wakeupRequestId, "failed", {
+          finishedAt,
+          error: denied.run.error,
+        });
+        await releaseIssueExecutionAndPromote(denied.run);
+        await finalizeAgentStatus(agent.id, "failed", denied.run.error);
+      }
       return;
     }
 
