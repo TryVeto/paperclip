@@ -34,7 +34,6 @@ import {
 import { tmpdir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendFileSync } from "node:fs";
 
 /** Walk outDir; rewrite absolute symlinks that still point into stageDir to relative targets. */
 function rewriteStageAbsoluteSymlinks(rootDir, stageRoot) {
@@ -89,29 +88,6 @@ function rewriteStageAbsoluteSymlinks(rootDir, stageRoot) {
     }
   }
   return { rewritten, dangling, samples };
-}
-
-const DEBUG_LOG = "/home/sebastianheyneman_tryveto_com/.cursor/debug-02fbe2.log";
-function dbg(hypothesisId, location, message, data) {
-  const payload = {
-    sessionId: "02fbe2",
-    runId: process.env.DEBUG_RUN_ID || "post-fix",
-    hypothesisId,
-    location,
-    message,
-    data,
-    timestamp: Date.now(),
-  };
-  try {
-    appendFileSync(DEBUG_LOG, `${JSON.stringify(payload)}\n`);
-  } catch {
-    /* ignore */
-  }
-  fetch("http://127.0.0.1:7545/ingest/4ed7b7c9-5622-400e-a37d-190daaa78dcd", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "02fbe2" },
-    body: JSON.stringify(payload),
-  }).catch(() => {});
 }
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -279,59 +255,19 @@ try {
     outDir,
     "node_modules/@embedded-postgres/linux-x64/native/lib/libicui18n.so.60",
   );
-  // #region agent log
-  dbg("B", "package-immutable-release.mjs:pre-symlink-fix", "absolute stage symlinks before rewrite", {
-    outDir,
-    stageDir,
-    binSample: (() => {
-      try {
-        return readlinkSync(join(outDir, "node_modules/.bin/paperclipai"));
-      } catch (e) {
-        return String(e);
-      }
-    })(),
-    icuSample: (() => {
-      try {
-        return readlinkSync(icuLink);
-      } catch (e) {
-        return String(e);
-      }
-    })(),
-    icuExistsBefore: existsSync(icuLink),
-  });
-  // #endregion
 
   // npm / package postinstall may create absolute symlinks into stageDir (.bin,
   // embedded-postgres native/lib, etc.). After stage cleanup those dangle.
   // Rewrite every absolute link that still points into stageDir to a relative target.
-  const { rewritten, dangling, samples } = rewriteStageAbsoluteSymlinks(outDir, stageDir);
+  const { rewritten, dangling } = rewriteStageAbsoluteSymlinks(outDir, stageDir);
 
   const paperclipBin = join(outDir, "node_modules/.bin/paperclipai");
-  let paperclipTarget = null;
-  try {
-    paperclipTarget = readlinkSync(paperclipBin);
-  } catch {
-    paperclipTarget = null;
-  }
   let icuTarget = null;
   try {
     icuTarget = readlinkSync(icuLink);
   } catch {
     icuTarget = null;
   }
-
-  // #region agent log
-  dbg("B", "package-immutable-release.mjs:post-symlink-fix", "symlinks after stage-absolute rewrite", {
-    rewritten,
-    dangling,
-    samples,
-    binTarget: paperclipTarget,
-    binExists: existsSync(paperclipBin),
-    icuTarget,
-    icuExists: existsSync(icuLink),
-    icuIsAbsolute: typeof icuTarget === "string" && icuTarget.startsWith("/"),
-  });
-  // #endregion
 
   if (!existsSync(paperclipBin) || !existsSync(join(outDir, "node_modules/paperclipai/dist/index.js"))) {
     throw new Error("paperclipai bin broken after outDir promotion (absolute symlink leak)");
