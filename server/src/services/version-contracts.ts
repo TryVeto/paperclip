@@ -121,22 +121,6 @@ async function evaluateDescendantsCursorProvenance(
   const failedPredicates: string[] = [];
   const issueSummaries: Array<Record<string, unknown>> = [];
 
-  // #region agent log
-  fetch("http://127.0.0.1:7545/ingest/4ed7b7c9-5622-400e-a37d-190daaa78dcd", {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "02fbe2" },
-    body: JSON.stringify({
-      sessionId: "02fbe2",
-      runId: "verify-harden",
-      hypothesisId: "SPEC4",
-      location: "version-contracts.ts:evaluateDescendantsCursorProvenance",
-      message: "descendant provenance evaluation",
-      data: { rootIssueId, descendantCount: descendants.length },
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {});
-  // #endregion
-
   // SPEC-4: zero implementation descendants is never sufficient Cursor provenance.
   if (descendants.length === 0) {
     failedPredicates.push("no_implementation_descendants");
