@@ -38,3 +38,15 @@
 - Did **not** restart production Paperclip or flip the release symlink.
 - Did **not** open or unlock v0.08.
 - Did **not** touch buyer-flow worktrees.
+
+
+## Published artifacts
+
+| Item | Value |
+|---|---|
+| Local lineage commit (on `veto/paperclip-v0.07-overnight-closeout`) | `33d78988c6f15e7eddf24b5f378964e02184aad0` |
+| Published orphan snapshot (TryVeto/paperclip-v0.07-closeout `main`) | `4ffd3602535bcbf1811ffdfc15456b08c32576e2` |
+| Repo URL | https://github.com/TryVeto/paperclip-v0.07-closeout |
+| Unit tests | 28/28 pass (`version-contract-service`, `section2-corrective`, `git-provenance-closeout`) |
+
+Push note: OAuth token lacks `workflow` scope, so publish is an orphan tree without `.github/workflows`. Full lineage remains locally on `veto/paperclip-v0.07-overnight-closeout` (parent `61b577b…`).
