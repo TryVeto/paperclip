@@ -25,6 +25,16 @@ describe("run traffic classification", () => {
     expect(c.actionable).toBe(true);
   });
 
+  it("does not over-classify agent on_demand as natural without explicit stamp", () => {
+    const c = resolveRunTrafficClassification({
+      requestedByActorType: "agent",
+      source: "on_demand",
+    });
+    expect(c.trafficClass).toBe("system");
+    expect(c.actionable).toBe(false);
+    expect(c.actionabilityReason).toBe("agent_on_demand_requires_explicit_stamp");
+  });
+
   it("keeps timers/system non-actionable", () => {
     const c = resolveRunTrafficClassification({ source: "timer", triggerDetail: "system" });
     expect(c.trafficClass).toBe("system");

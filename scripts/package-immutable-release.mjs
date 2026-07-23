@@ -217,6 +217,7 @@ try {
   run("node", ["scripts/write-build-manifest.mjs", manifestPath], {
     env: {
       PAPERCLIP_RELEASE_ARTIFACTS_DIR: artifacts,
+      PAPERCLIP_INSTALLED_RELEASE_ROOT: stageDir,
       PAPERCLIP_PRODUCT_BASE_SHA: process.env.PAPERCLIP_PRODUCT_BASE_SHA || "9cad4cb71670c00191e52ab44e877156dfaf2118",
     },
   });
@@ -228,6 +229,9 @@ try {
   }
   if (!manifest.releaseDigest || !manifest.packageDigests?.length) {
     throw new Error("manifest missing releaseDigest/packageDigests");
+  }
+  if (!manifest.installedRuntimeDigests?.length) {
+    throw new Error("manifest missing installedRuntimeDigests");
   }
 
   writeFileSync(

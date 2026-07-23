@@ -833,18 +833,28 @@ export async function startServer(): Promise<StartedServer> {
           productBaseSha: manifest.productBaseSha,
           releaseDigest: manifest.releaseDigest ?? null,
           packageDigestCount: manifest.packageDigests?.length ?? 0,
+          installedRuntimeDigestCount: manifest.installedRuntimeDigests?.length ?? 0,
           digestVerify,
         },
         "build manifest attestation loaded",
       );
+      if (digestVerify && !digestVerify.ok) {
+        logger.error(
+          { digestVerify },
+          "build manifest digest verification failed — closeShip will refuse until installed runtime verifies",
+        );
+      }
     } else {
       logger.warn({ digestVerify }, "no build manifest attestation found at startup");
     }
   } catch (err) {
-    logger.warn({ err }, "failed to load build manifest attestation");
+    // Fail closed when STRICT or production; otherwise surface and continue for local dev only.
+    logger.error({ err }, "failed to load build manifest attestation");
     if (
       process.env.PAPERCLIP_RELEASE_DIGEST_STRICT === "1" ||
-      process.env.PAPERCLIP_RELEASE_DIGEST_STRICT === "true"
+      process.env.PAPERCLIP_RELEASE_DIGEST_STRICT === "true" ||
+      process.env.NODE_ENV === "production" ||
+      process.env.PAPERCLIP_ENV === "production"
     ) {
       throw err;
     }

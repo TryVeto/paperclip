@@ -21,10 +21,12 @@ import { conflict, forbidden, badRequest, notFound } from "../errors.js";
 import {
   applyImmutableCapabilitiesToRuntimeConfig,
   assertExecutorForLane,
+  assertLaneMutationAllowed,
   buildImmutableLaneCapabilities,
   CURSOR_IMPLEMENTATION_ADAPTERS,
   deriveDisplayState,
   evaluateShipGate,
+  isCodexSpecificationOwner,
   isCursorImplementationMode,
   isSha40,
   isV007BootstrapEligible,
@@ -35,23 +37,46 @@ import {
   type VersionContractRow,
 } from "./version-contract-policy.js";
 import {
+  assertReleaseAttestationReadyForClose,
   getBuildManifestAttestation,
+  getLastReleaseDigestVerify,
   type BuildManifestAttestation,
 } from "../build-manifest.js";
+import { sourceHeadEqualsInstalledIsInsufficient } from "./git-provenance.js";
 
 type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 
 const FREEZE_OPENS_ENV = "PAPERCLIP_FREEZE_VERSION_OPENS";
 const THINKING_ZERO_AGENT_NAME = "Thinking-zero";
 
-type VerificationCheck = {
-  name: string;
-  passed: boolean;
-  detail?: string;
-  command?: string;
-  artifactRef?: string;
-  timestamp?: string;
-};
+function parseBootstrapImplementationFacts(body: string): {
+  ok: boolean;
+  missing: string[];
+  facts: Record<string, string>;
+} {
+  const required = [
+    "dispatch_executor",
+    "workspace",
+    "commit",
+    "ancestry",
+    "command",
+    "artifact",
+  ] as const;
+  const facts: Record<string, string> = {};
+  const missing: string[] = [];
+  for (const key of required) {
+    // Accept either `key: value` or `- key: value` lines in the evidence body.
+    const re = new RegExp(`(?:^|\\n)\\s*-?\\s*${key}\\s*:\\s*(\\S[^\\n]*)`, "i");
+    const m = body.match(re);
+    const value = m?.[1]?.trim() ?? "";
+    if (!value || value.toLowerCase() === "none" || value === "-" || value === "n/a") {
+      missing.push(key);
+    } else {
+      facts[key] = value;
+    }
+  }
+  return { ok: missing.length === 0, missing, facts };
+}
 
 async function listDescendantIssues(tx: Tx, rootIssueId: string) {
   const rows = await tx.execute(sql`
@@ -290,23 +315,23 @@ export function versionContractService(db: Db) {
           delegateAdapter: (owner.adapterConfig as Record<string, unknown> | null)?.delegateAdapter as
             | string
             | undefined,
+          routingDelegate: (owner.adapterConfig as Record<string, unknown> | null)?.routingDelegate as
+            | string
+            | undefined,
         });
-        // Spec owner must resolve to Codex (including via router alias that delegates to codex_local).
-        // For veto_runtime_router, model route may be sol-extra-high → codex_local; accept adapter types that are Codex or router with Codex-capable routes.
-        const ownerOk =
-          ownerExecutor === "codex_local" ||
-          owner.adapterType === "codex_local" ||
-          (owner.adapterType === "veto_runtime_router" &&
-            String((owner.adapterConfig as Record<string, unknown> | null)?.model ?? "").includes("sol"));
-        if (!ownerOk && owner.adapterType !== "codex_local") {
-          // Strict: resolved executor must be Codex for specification ownership.
-          if (owner.adapterType !== "codex_local" && ownerExecutor !== "codex_local") {
-            throw conflict("specification_owner_not_codex", {
-              code: "specification_owner_not_codex",
-              adapterType: owner.adapterType,
-              resolved: ownerExecutor,
-            });
-          }
+        // Spec owner must resolve to Codex via adapter type or explicit delegateAdapter /
+        // routingDelegate — never by inferring authority from a model string containing "sol".
+        if (
+          !isCodexSpecificationOwner({
+            adapterType: owner.adapterType,
+            resolvedExecutor: ownerExecutor,
+          })
+        ) {
+          throw conflict("specification_owner_not_codex", {
+            code: "specification_owner_not_codex",
+            adapterType: owner.adapterType,
+            resolved: ownerExecutor,
+          });
         }
 
         let rootIssueId = input.rootIssueId;
@@ -601,6 +626,18 @@ export function versionContractService(db: Db) {
       return applyImmutableCapabilitiesToRuntimeConfig(runtimeConfig, caps);
     },
 
+    assertLaneMutation(caps: ImmutableLaneCapabilities, action: "finalize" | "commit" | "merge" | "sandbox_write") {
+      const check = assertLaneMutationAllowed(caps, action);
+      if (!check.ok) {
+        throw conflict("lane_mutation_forbidden", {
+          code: "lane_mutation_forbidden",
+          predicate: check.predicate,
+          action,
+        });
+      }
+      return { ok: true as const };
+    },
+
     assertDispatchExecutor(input: {
       lane: ReturnType<typeof versionLaneForIssue>;
       adapterType: string;
@@ -780,12 +817,42 @@ export function versionContractService(db: Db) {
     },
 
     async closeShip(projectId: string, input: CloseShipInput) {
-      const attestation = getBuildManifestAttestation();
-      if (!attestation?.candidateSha) {
-        throw conflict("missing_build_manifest_attestation", { code: "missing_build_manifest_attestation" });
+      // Close path: never warn-and-continue. Installed runtime digests must verify.
+      let attestation: BuildManifestAttestation;
+      try {
+        ({ attestation } = assertReleaseAttestationReadyForClose());
+      } catch (err) {
+        throw conflict("release_attestation_not_verified", {
+          code: "release_attestation_not_verified",
+          detail: err instanceof Error ? err.message : String(err),
+        });
       }
-      // Request-supplied observedLiveSha is evidence only and cannot override attestation.
+      const digestVerify = getLastReleaseDigestVerify();
+      if (!digestVerify?.ok || !digestVerify.installedRuntimeOk) {
+        throw conflict("release_attestation_not_verified", {
+          code: "release_attestation_not_verified",
+          detail: digestVerify?.detail ?? "missing_verify",
+        });
+      }
+
+      // Request-supplied observedLiveSha / source HEAD are evidence only and cannot
+      // override attestation. Equal hex strings alone never prove install identity.
       void input.observedLiveSha;
+      const sourceHeadClaim = sourceHeadEqualsInstalledIsInsufficient({
+        sourceHeadSha: process.env.PAPERCLIP_SOURCE_HEAD_SHA ?? null,
+        installedCandidateSha: attestation.candidateSha,
+        installedRuntimeDigestOk: digestVerify.installedRuntimeOk,
+      });
+      if (
+        process.env.PAPERCLIP_SOURCE_HEAD_SHA &&
+        !sourceHeadClaim.equivalentClaimAllowed &&
+        sourceHeadClaim.reason === "hex_match_without_installed_runtime_digest"
+      ) {
+        throw conflict("source_head_ne_installed_release", {
+          code: "source_head_ne_installed_release",
+          reason: sourceHeadClaim.reason,
+        });
+      }
 
       return db.transaction(async (tx) => {
         await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtext(${`version-ship:${projectId}`}))`);
@@ -872,6 +939,8 @@ export function versionContractService(db: Db) {
           deployedSourceSha: running,
           verificationCandidate,
           buildManifest: attestation,
+          releaseDigestVerify: digestVerify,
+          sourceHeadEquivalence: sourceHeadClaim,
           gateSnapshot: {
             acceptedCanonicalSpec,
             decompositionSpec,
@@ -919,41 +988,17 @@ export function versionContractService(db: Db) {
           throw conflict("version_not_shipped", { code: "version_not_shipped" });
         }
 
-        const priorHistory = Array.isArray(row.receiptHistory)
-          ? (row.receiptHistory as Record<string, unknown>[])
-          : [];
-        const archiveEntry = {
-          voidedAt: new Date().toISOString(),
-          reason: input.reason ?? "board_void_ship",
+        // Closed release records are immutable. voidShip must not clear shippedAt,
+        // deployedSourceSha, shipReceipt, or verification locks. Append-only
+        // observations belong in a separate audit channel — never reopen-by-void.
+        throw conflict("shipped_record_immutable", {
+          code: "shipped_record_immutable",
+          detail: "closed releases cannot be voided or rewritten; open a new version instead",
+          versionKey: input.versionKey,
           shippedAt: row.shippedAt?.toISOString?.() ?? String(row.shippedAt),
           deployedSourceSha: row.deployedSourceSha,
-          shipReceipt: row.shipReceipt,
-          shipReceiptLockedAt: row.shipReceiptLockedAt?.toISOString?.() ?? row.shipReceiptLockedAt,
-          verificationReceipt: row.verificationReceipt,
-          verificationReceiptLockedAt:
-            row.verificationReceiptLockedAt?.toISOString?.() ?? row.verificationReceiptLockedAt,
-          candidateSourceSha: row.candidateSourceSha,
-        };
-
-        const [updated] = await tx
-          .update(projectVersionContracts)
-          .set({
-            receiptHistory: [...priorHistory, archiveEntry],
-            shippedAt: null,
-            deployedSourceSha: null,
-            shipReceipt: null,
-            shipReceiptLockedAt: null,
-            verificationReceipt: null,
-            verificationReceiptLockedAt: null,
-            candidateSourceSha: null,
-            blockReason: null,
-            updatedAt: new Date(),
-          })
-          .where(eq(projectVersionContracts.id, row.id))
-          .returning();
-
-        const result = asRow(updated);
-        return { ...result, displayState: deriveDisplayState(result), archived: archiveEntry };
+          reason: input.reason ?? null,
+        });
       });
     },
 
@@ -1029,6 +1074,25 @@ export function versionContractService(db: Db) {
           });
         }
 
+        const implFacts = parseBootstrapImplementationFacts(doc.latestBody);
+        if (!implFacts.ok) {
+          throw conflict("adopt_bootstrap_rejected", {
+            code: "adopt_bootstrap_rejected",
+            predicate: "bootstrap_missing_implementation_facts",
+            missing: implFacts.missing,
+          });
+        }
+
+        const provenance = await evaluateDescendantsCursorProvenance(tx, input.rootIssueId);
+        if (!provenance.ok || provenance.issues.filter((i) => !i.skipped).length === 0) {
+          throw conflict("adopt_bootstrap_rejected", {
+            code: "adopt_bootstrap_rejected",
+            predicate: "bootstrap_missing_cursor_implementation",
+            failedPredicates: provenance.failedPredicates,
+            descendantCount: provenance.issues.length,
+          });
+        }
+
         const [link] = await tx
           .select()
           .from(issueDocuments)
@@ -1075,11 +1139,19 @@ export function versionContractService(db: Db) {
             bodyChars: doc.latestBody.length,
             issueDocumentId: link.id,
             issueId: link.issueId,
+            implementationFacts: implFacts.facts,
           },
+          implementationIssues: provenance.issues,
           checks: [
             { name: "bootstrap_evidence_present", passed: true },
             { name: "bootstrap_evidence_nonempty", passed: true },
             { name: "bootstrap_evidence_locked", passed: true },
+            { name: "bootstrap_implementation_facts", passed: true, detail: Object.keys(implFacts.facts).join(",") },
+            {
+              name: "descendants_done_cursor_provenance",
+              passed: true,
+              detail: `descendants=${provenance.issues.length}`,
+            },
             { name: "running_build_attestation", passed: true, detail: attestedCandidate },
           ],
           untrustedCallerEvidence: {

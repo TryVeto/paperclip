@@ -192,6 +192,40 @@ export function applyImmutableCapabilitiesToRuntimeConfig(
   return next;
 }
 
+/**
+ * Hard enforcement for specification-lane isolation. Metadata flags alone are
+ * insufficient — callers must invoke this before commit / mutate / finalize paths.
+ */
+export function assertLaneMutationAllowed(
+  caps: ImmutableLaneCapabilities,
+  action: "finalize" | "commit" | "merge" | "sandbox_write",
+): { ok: true } | { ok: false; predicate: string } {
+  if (action === "finalize" && caps.forbidFinalize) {
+    return { ok: false, predicate: "specification_lane_forbids_finalize" };
+  }
+  if (action === "commit" && caps.forbidCommit) {
+    return { ok: false, predicate: "specification_lane_forbids_commit" };
+  }
+  if (action === "merge" && caps.forbidMerge) {
+    return { ok: false, predicate: "specification_lane_forbids_merge" };
+  }
+  if (action === "sandbox_write" && caps.codexSandboxForcedReadOnly) {
+    return { ok: false, predicate: "specification_lane_sandbox_read_only" };
+  }
+  return { ok: true };
+}
+
+/** Spec owner must resolve to Codex via adapter type or explicit delegate — never model-string heuristics. */
+export function isCodexSpecificationOwner(input: {
+  adapterType: string;
+  resolvedExecutor: string;
+}): boolean {
+  const adapter = input.adapterType.toLowerCase();
+  const resolved = input.resolvedExecutor.toLowerCase();
+  if (CODEX_SPEC_ADAPTERS.has(adapter) || CODEX_SPEC_ADAPTERS.has(resolved)) return true;
+  return false;
+}
+
 export type ShipGateSnapshot = {
   acceptedCanonicalSpec: string;
   decompositionSpec: string;

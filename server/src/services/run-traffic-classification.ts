@@ -67,7 +67,7 @@ export function resolveRunTrafficClassification(input: {
     };
   }
 
-  // Trusted session boundaries may stamp natural/actionable without a token.
+  // Trusted board user sessions may stamp natural/actionable without a token.
   if (input.requestedByActorType === "user") {
     return {
       trafficClass: "natural",
@@ -76,11 +76,13 @@ export function resolveRunTrafficClassification(input: {
       requestReceivedAt,
     };
   }
+  // Agent on_demand is NOT automatically natural — that over-classified probes and
+  // canaries as observation traffic. Require an explicit trusted boundary stamp.
   if (input.requestedByActorType === "agent" && input.source === "on_demand") {
     return {
-      trafficClass: "natural",
-      actionable: true,
-      actionabilityReason: "trusted_agent_on_demand_session",
+      trafficClass: "system",
+      actionable: false,
+      actionabilityReason: "agent_on_demand_requires_explicit_stamp",
       requestReceivedAt,
     };
   }

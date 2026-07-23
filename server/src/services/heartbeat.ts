@@ -13407,6 +13407,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         );
       }
       let adapterFinalizeOutcome: "succeeded" | "failed" | null = null;
+      let laneCapabilitiesForFinalize: {
+        forbidFinalize: boolean;
+        forbidCommit: boolean;
+      } | null = null;
       const inspectFinalizeWorkspaceBranch = async () => {
         const workspaceRecord = persistedExecutionWorkspace?.id
           ? await executionWorkspacesSvc.getById(persistedExecutionWorkspace.id)
@@ -13442,6 +13446,13 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             let inspection = branchInspection.inspection;
             const initialManagedGitWorktreeBranch = formatManagedGitWorktreeBranchInspection(inspection);
             if (!inspection.valid && inspection.reasonCode === "branch_mismatch" && inspection.repoRoot) {
+              if (laneCapabilitiesForFinalize?.forbidFinalize || laneCapabilitiesForFinalize?.forbidCommit) {
+                throw conflict("lane_mutation_forbidden", {
+                  code: "lane_mutation_forbidden",
+                  predicate: "specification_lane_forbids_finalize_repair",
+                  reasonCode: inspection.reasonCode,
+                });
+              }
               let repairedExpectedBranchName = inspection.expectedBranchName;
               try {
                 const coherence = await ensureGitWorktreeBranchCoherent({
@@ -13621,6 +13632,21 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             runtimeConfig as Record<string, unknown>,
             laneInfo.capabilities,
           ) as typeof runtimeConfig;
+          // Hard-enforce specification lane isolation (not metadata-only).
+          if (laneInfo.capabilities.codexSandboxForcedReadOnly) {
+            const sandbox = String(
+              (runtimeConfig as Record<string, unknown>).sandbox ??
+                (runtimeConfig as Record<string, unknown>).sandboxMode ??
+                "",
+            ).toLowerCase();
+            if (sandbox !== "read-only") {
+              throw conflict("lane_mutation_forbidden", {
+                code: "lane_mutation_forbidden",
+                predicate: "specification_lane_sandbox_not_read_only",
+                sandbox: sandbox || null,
+              });
+            }
+          }
           if (laneInfo.capabilities.disposableSpecSnapshot) {
             adapterContext.paperclipSpecSnapshot = true;
             adapterContext.paperclipForbidFinalize = true;
@@ -13630,6 +13656,10 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           if (laneInfo.capabilities.workspaceBaseSha) {
             adapterContext.paperclipImplementationBaseSha = laneInfo.capabilities.workspaceBaseSha;
           }
+          laneCapabilitiesForFinalize = {
+            forbidFinalize: laneInfo.capabilities.forbidFinalize,
+            forbidCommit: laneInfo.capabilities.forbidCommit,
+          };
         }
         adapterResult = await adapter.execute({
           runId: run.id,

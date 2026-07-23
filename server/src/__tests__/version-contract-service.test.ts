@@ -2,10 +2,12 @@ import { describe, expect, it, beforeEach } from "vitest";
 import { V007_BOOTSTRAP } from "@paperclipai/shared";
 import {
   assertExecutorForLane,
+  assertLaneMutationAllowed,
   applyImmutableCapabilitiesToRuntimeConfig,
   buildImmutableLaneCapabilities,
   deriveDisplayState,
   evaluateShipGate,
+  isCodexSpecificationOwner,
   isCursorImplementationMode,
   isSha40,
   isV007BootstrapEligible,
@@ -327,19 +329,75 @@ describe("migration journal uniqueness", () => {
 });
 
 describe("voidShip archive shape (policy-level contract)", () => {
-  it("documents that void clears ship lock while preserving history payload fields", () => {
-    // Service integration covers DB round-trip; this guards the archive contract shape.
-    const archive = {
-      voidedAt: new Date().toISOString(),
-      reason: "incident_repair",
-      shippedAt: new Date().toISOString(),
+  it("documents that closed releases are immutable — void must not clear ship locks", () => {
+    // Closed records stay shipped; voidShip throws shipped_record_immutable.
+    const closed = baseRow({
+      shippedAt: new Date(),
       deployedSourceSha: "e".repeat(40),
       shipReceipt: { deployedSourceSha: "e".repeat(40) },
       verificationReceipt: { candidateSourceSha: "e".repeat(40) },
+      verificationReceiptLockedAt: new Date(),
       candidateSourceSha: "e".repeat(40),
+    });
+    expect(deriveDisplayState(closed)).toBe("shipped");
+    expect(closed.shippedAt).not.toBeNull();
+    expect(closed.deployedSourceSha).toBe("e".repeat(40));
+    // Prohibited reopen shape (what voidShip used to do) must NOT be the contract.
+    const prohibitedReopen = {
+      shippedAt: null,
+      deployedSourceSha: null,
+      shipReceipt: null,
+      verificationReceipt: null,
+      candidateSourceSha: null,
     };
-    expect(archive.shipReceipt.deployedSourceSha).toBe(archive.deployedSourceSha);
-    expect(isSha40(archive.candidateSourceSha)).toBe(true);
-    expect(deriveDisplayState(baseRow({ shippedAt: null, verificationReceipt: null }))).toBe("specifying");
+    expect(prohibitedReopen.shippedAt).toBeNull();
+    expect(deriveDisplayState(baseRow(prohibitedReopen))).toBe("specifying");
+    // The allowed state after a close remains shipped — never mutated back.
+    expect(deriveDisplayState(closed)).not.toBe("specifying");
+  });
+});
+
+describe("codex specification owner (no model-string heuristic)", () => {
+  it("accepts codex_local adapter or resolved executor only — never model includes sol", () => {
+    expect(
+      isCodexSpecificationOwner({ adapterType: "codex_local", resolvedExecutor: "codex_local" }),
+    ).toBe(true);
+    expect(
+      isCodexSpecificationOwner({
+        adapterType: "veto_runtime_router",
+        resolvedExecutor: "codex_local",
+      }),
+    ).toBe(true);
+    expect(
+      isCodexSpecificationOwner({
+        adapterType: "veto_runtime_router",
+        resolvedExecutor: "veto_runtime_router",
+      }),
+    ).toBe(false);
+    // Model string containing "sol" is irrelevant — authority is executor resolution.
+    const fakeModel = "sol-extra-high";
+    expect(fakeModel.includes("sol")).toBe(true);
+    expect(
+      isCodexSpecificationOwner({
+        adapterType: "veto_runtime_router",
+        resolvedExecutor: "cursor",
+      }),
+    ).toBe(false);
+  });
+
+  it("enforces forbidFinalize/forbidCommit via assertLaneMutationAllowed", () => {
+    const caps = buildImmutableLaneCapabilities({
+      lane: "specification",
+      implementationBaseSha: "c".repeat(40),
+    });
+    expect(assertLaneMutationAllowed(caps, "finalize").ok).toBe(false);
+    expect(assertLaneMutationAllowed(caps, "commit").ok).toBe(false);
+    expect(assertLaneMutationAllowed(caps, "sandbox_write").ok).toBe(false);
+    const impl = buildImmutableLaneCapabilities({
+      lane: "implementation",
+      implementationBaseSha: "c".repeat(40),
+    });
+    expect(assertLaneMutationAllowed(impl, "finalize").ok).toBe(true);
+    expect(assertLaneMutationAllowed(impl, "commit").ok).toBe(true);
   });
 });
