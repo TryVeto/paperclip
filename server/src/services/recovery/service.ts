@@ -4935,6 +4935,7 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
       livePathSkipped: 0,
       interactionSkipped: 0,
       pauseHoldSkipped: 0,
+      notInvokableSkipped: 0,
       notReadySkipped: 0,
       candidateLimitSkipped: 0,
       deferredOrFailed: 0,
@@ -5090,6 +5091,31 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
           continue;
         }
 
+        const assignee = await getAgent(agentId);
+        if (!(await isAgentInvokable(assignee))) {
+          result.notInvokableSkipped += 1;
+          // #region agent log
+          fetch("http://127.0.0.1:7545/ingest/4ed7b7c9-5622-400e-a37d-190daaa78dcd", {
+            method: "POST",
+            headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "02fbe2" },
+            body: JSON.stringify({
+              sessionId: "02fbe2",
+              runId: "paused-wake",
+              hypothesisId: "PAUSED",
+              location: "recovery/service.ts:reconcileResolvedDependencyWakeBackstop",
+              message: "skip dependency wake for non-invokable assignee",
+              data: {
+                issueId: candidate.id,
+                agentId,
+                agentStatus: assignee?.status ?? null,
+              },
+              timestamp: Date.now(),
+            }),
+          }).catch(() => {});
+          // #endregion
+          continue;
+        }
+
         try {
           const wake = await deps.enqueueWakeup(agentId, {
             source: "automation",
@@ -5142,6 +5168,15 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
             },
           });
         } catch (err) {
+          const details =
+            err && typeof err === "object" && "details" in err
+              ? ((err as { details?: Record<string, unknown> }).details ?? null)
+              : null;
+          const agentStatus = details && typeof details.agentStatus === "string" ? details.agentStatus : null;
+          if (agentStatus === "paused" || agentStatus === "terminated" || agentStatus === "pending_approval") {
+            result.notInvokableSkipped += 1;
+            continue;
+          }
           result.deferredOrFailed += 1;
           result.enqueueFailed += 1;
           logger.warn(
