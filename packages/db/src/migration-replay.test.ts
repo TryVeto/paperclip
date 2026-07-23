@@ -70,7 +70,8 @@ describeEmbeddedPostgres("migration journal append-only + replay", () => {
 
     const pending = await inspectMigrations(database.connectionString);
     expect(pending.status).toBe("needsMigrations");
-    expect(pending.pendingMigrations.some((m) => m.includes("0186_run_traffic_classification"))).toBe(
+    if (pending.status !== "needsMigrations") throw new Error("expected pending migrations");
+    expect(pending.pendingMigrations.some((m: string) => m.includes("0186_run_traffic_classification"))).toBe(
       true,
     );
 
