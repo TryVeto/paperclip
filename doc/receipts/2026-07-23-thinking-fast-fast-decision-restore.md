@@ -11,3 +11,16 @@ Thinking-fast uses `veto_runtime_router` + sentinel model `fast_decision_only` s
 
 ## Live cutover
 Documented after package install (candidate SHA = this commit).
+
+## Live cutover proof
+- Candidate / live SHA: `23fc90fbab20f7a9f7a8dfb9fed5a802b4c8c541`
+- Release digest: `2e7bc4b647ae74a00043d6aa8c81e86510e2c0f3f33b92bcc4462b42b5dba254`
+- Symlink: `/home/droid/.local/lib/paperclip-veto-mainline-cloud` → `…/releases/23fc90fb…`
+- Startup: `digestVerify.ok=true`, `installedRuntimeOk=true`
+- Thinking-fast `adapterConfig.model` restored to `fast_decision_only`; status `idle`
+- Dry invoke run `8eaf37ef-9efd-4214-a7f4-1aecda2db127` → **succeeded** in ~1s with `fastDecision.action=no_op`, `emptyInbox=true`, `cursorFallback=false`
+
+## Sebastian verify
+1. Board: Thinking-fast should show idle (not error).
+2. On VET-596 (or VET-594): Clear error if needed → Assign/Retry to Thinking-fast.
+3. Expect Luna fast-decision (or escalate to Thinking-slow), **not** `Invalid route alias`.
