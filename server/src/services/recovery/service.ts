@@ -5094,25 +5094,6 @@ export function recoveryService(db: Db, deps: { enqueueWakeup: RecoveryWakeup })
         const assignee = await getAgent(agentId);
         if (!(await isAgentInvokable(assignee))) {
           result.notInvokableSkipped += 1;
-          // #region agent log
-          fetch("http://127.0.0.1:7545/ingest/4ed7b7c9-5622-400e-a37d-190daaa78dcd", {
-            method: "POST",
-            headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "02fbe2" },
-            body: JSON.stringify({
-              sessionId: "02fbe2",
-              runId: "paused-wake",
-              hypothesisId: "PAUSED",
-              location: "recovery/service.ts:reconcileResolvedDependencyWakeBackstop",
-              message: "skip dependency wake for non-invokable assignee",
-              data: {
-                issueId: candidate.id,
-                agentId,
-                agentStatus: assignee?.status ?? null,
-              },
-              timestamp: Date.now(),
-            }),
-          }).catch(() => {});
-          // #endregion
           continue;
         }
 
