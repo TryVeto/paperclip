@@ -16198,6 +16198,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           .returning()
           .then((rows) => rows[0]);
 
+        const traffic = resolveRunTrafficClassification({
+          source,
+          triggerDetail,
+          requestedByActorType: opts.requestedByActorType ?? null,
+          trafficClassification: opts.trafficClassification ?? null,
+          requestReceivedAt: opts.requestReceivedAt ?? null,
+        });
+
         const newRun = await tx
           .insert(heartbeatRuns)
           .values({
@@ -16211,6 +16219,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
             contextSnapshot: enrichedContextSnapshot,
             sessionIdBefore: sessionBefore,
             continuationAttempt,
+            ...classificationInsertFields(traffic),
           })
           .returning()
           .then((rows) => rows[0]);
