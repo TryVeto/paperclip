@@ -321,7 +321,8 @@ describe("migration journal uniqueness", () => {
     const tags = journal.entries.map((e) => e.tag);
     expect(tags.filter((t) => t === "0184_project_version_contracts")).toHaveLength(1);
     expect(tags.filter((t) => t === "0185_version_contract_receipt_history")).toHaveLength(1);
-    expect(tags.at(-1)).toBe("0185_version_contract_receipt_history");
+    expect(tags.filter((t) => t === "0186_run_traffic_classification")).toHaveLength(1);
+    expect(tags.at(-1)).toBe("0186_run_traffic_classification");
   });
 });
 

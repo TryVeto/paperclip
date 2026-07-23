@@ -70,6 +70,10 @@ import {
 import { conflict, HttpError, notFound } from "../errors.js";
 import { logger } from "../middleware/logger.js";
 import { publishLiveEvent } from "./live-events.js";
+import {
+  classificationInsertFields,
+  resolveRunTrafficClassification,
+} from "./run-traffic-classification.js";
 import { normalizeResponsibleUserDenialCode } from "./responsible-user-denial-run-outcomes.js";
 import { getRunLogStore, type RunLogHandle } from "./run-log-store.js";
 import { getServerAdapter, listAdapterModelProfiles, runningProcesses } from "../adapters/index.js";
@@ -2041,6 +2045,14 @@ interface WakeupOptions {
   requestedByActorType?: "user" | "agent" | "system";
   requestedByActorId?: string | null;
   contextSnapshot?: Record<string, unknown>;
+  /** Trusted boundary stamp only — never accept raw client-supplied traffic_class. */
+  trafficClassification?: {
+    trafficClass: "natural" | "canary" | "synthetic" | "operator_probe" | "system";
+    actionable: boolean;
+    actionabilityReason: string;
+    requestReceivedAt?: Date;
+  } | null;
+  requestReceivedAt?: Date | null;
 }
 
 type UsageTotals = {
@@ -16360,6 +16372,14 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
         .returning()
         .then((rows) => rows[0]);
 
+      const traffic = resolveRunTrafficClassification({
+        source,
+        triggerDetail,
+        requestedByActorType: opts.requestedByActorType ?? null,
+        trafficClassification: opts.trafficClassification ?? null,
+        requestReceivedAt: opts.requestReceivedAt ?? null,
+      });
+
       const newRun = await tx
         .insert(heartbeatRuns)
         .values({
@@ -16373,6 +16393,7 @@ export function heartbeatService(db: Db, options: HeartbeatServiceOptions = {}) 
           contextSnapshot: enrichedContextSnapshot,
           sessionIdBefore: sessionBefore,
           continuationAttempt,
+          ...classificationInsertFields(traffic),
         })
         .returning()
         .then((rows) => rows[0]);

@@ -823,18 +823,31 @@ export async function startServer(): Promise<StartedServer> {
   }
 
   try {
-    const { loadBuildManifestAtStartup } = await import("./build-manifest.js");
+    const { loadBuildManifestAtStartup, getLastReleaseDigestVerify } = await import("./build-manifest.js");
     const manifest = loadBuildManifestAtStartup();
+    const digestVerify = getLastReleaseDigestVerify();
     if (manifest) {
       logger.info(
-        { candidateSha: manifest.candidateSha, productBaseSha: manifest.productBaseSha },
+        {
+          candidateSha: manifest.candidateSha,
+          productBaseSha: manifest.productBaseSha,
+          releaseDigest: manifest.releaseDigest ?? null,
+          packageDigestCount: manifest.packageDigests?.length ?? 0,
+          digestVerify,
+        },
         "build manifest attestation loaded",
       );
     } else {
-      logger.warn("no build manifest attestation found at startup");
+      logger.warn({ digestVerify }, "no build manifest attestation found at startup");
     }
   } catch (err) {
     logger.warn({ err }, "failed to load build manifest attestation");
+    if (
+      process.env.PAPERCLIP_RELEASE_DIGEST_STRICT === "1" ||
+      process.env.PAPERCLIP_RELEASE_DIGEST_STRICT === "true"
+    ) {
+      throw err;
+    }
   }
 
   let drainHeartbeatRunsForShutdown: ((signal: "SIGINT" | "SIGTERM") => Promise<unknown>) | null = null;

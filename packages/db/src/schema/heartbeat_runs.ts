@@ -55,6 +55,15 @@ export const heartbeatRuns = pgTable(
     lastUsefulActionAt: timestamp("last_useful_action_at", { withTimezone: true }),
     nextAction: text("next_action"),
     contextSnapshot: jsonb("context_snapshot").$type<Record<string, unknown>>(),
+    /**
+     * Trusted ingress classification — never inferred from titles.
+     * Fail-closed defaults: system / non-actionable until a trusted boundary stamps otherwise.
+     */
+    trafficClass: text("traffic_class").notNull().default("system"),
+    actionable: boolean("actionable").notNull().default(false),
+    actionabilityReason: text("actionability_reason").notNull().default("unset_fail_closed"),
+    /** Authoritative request receipt / submission time (not issue creation time). */
+    requestReceivedAt: timestamp("request_received_at", { withTimezone: true }).notNull().defaultNow(),
     createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
   },

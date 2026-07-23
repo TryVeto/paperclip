@@ -1289,6 +1289,13 @@
       "when": 1784743600000,
       "tag": "0185_version_contract_receipt_history",
       "breakpoints": true
+    },
+    {
+      "idx": 186,
+      "version": "7",
+      "when": 1784750000000,
+      "tag": "0186_run_traffic_classification",
+      "breakpoints": true
     }
   ]
 }
