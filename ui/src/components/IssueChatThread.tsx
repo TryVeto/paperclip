@@ -1823,7 +1823,8 @@ function IssueChatAssistantMessage({
           ) : null}
           {runHref ? (
             <DropdownMenuItem asChild>
-              <Link to={runHref} target="_blank" rel="noreferrer noopener">
+              {/* In-app only: target=_blank is a no-op in Paperclip Desktop (Electron). */}
+              <Link to={runHref}>
                 <Search className="mr-2 h-3.5 w-3.5" />
                 View run
               </Link>
