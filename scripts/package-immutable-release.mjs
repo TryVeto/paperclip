@@ -22,13 +22,42 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  lstatSync,
+  readlinkSync,
+  symlinkSync,
+  unlinkSync,
   rmSync,
   writeFileSync,
   chmodSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { appendFileSync } from "node:fs";
+
+const DEBUG_LOG = "/home/sebastianheyneman_tryveto_com/.cursor/debug-02fbe2.log";
+function dbg(hypothesisId, location, message, data) {
+  const payload = {
+    sessionId: "02fbe2",
+    runId: process.env.DEBUG_RUN_ID || "post-fix",
+    hypothesisId,
+    location,
+    message,
+    data,
+    timestamp: Date.now(),
+  };
+  try {
+    appendFileSync(DEBUG_LOG, `${JSON.stringify(payload)}\n`);
+  } catch {
+    /* ignore */
+  }
+  fetch("http://127.0.0.1:7545/ingest/4ed7b7c9-5622-400e-a37d-190daaa78dcd", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", "X-Debug-Session-Id": "02fbe2" },
+    body: JSON.stringify(payload),
+  }).catch(() => {});
+}
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const outDir = resolve(process.argv[2] || "");
@@ -190,8 +219,77 @@ try {
   console.log("== move stage to outDir ==");
   mkdirSync(dirname(outDir), { recursive: true });
   cpSync(stageDir, outDir, { recursive: true });
+
+  // #region agent log
+  dbg("A", "package-immutable-release.mjs:pre-bin-fix", "sample .bin target before rewrite", {
+    outDir,
+    sample: (() => {
+      try {
+        return readlinkSync(join(outDir, "node_modules/.bin/paperclipai"));
+      } catch (e) {
+        return String(e);
+      }
+    })(),
+    existsBefore: existsSync(join(outDir, "node_modules/.bin/paperclipai")),
+  });
+  // #endregion
+
+  // npm may create absolute .bin symlinks into stageDir; after stage cleanup those
+  // become dangling. Rewrite to relative targets inside outDir (matches live releases).
+  const binDir = join(outDir, "node_modules/.bin");
+  let rewrittenBins = 0;
+  let danglingBins = 0;
+  if (existsSync(binDir)) {
+    for (const name of readdirSync(binDir)) {
+      const linkPath = join(binDir, name);
+      let st;
+      try {
+        st = lstatSync(linkPath);
+      } catch {
+        continue;
+      }
+      if (!st.isSymbolicLink()) continue;
+      const target = readlinkSync(linkPath);
+      if (!target.startsWith("/")) continue;
+      const nmMarker = "/node_modules/";
+      const idx = target.lastIndexOf(nmMarker);
+      if (idx < 0) {
+        danglingBins += 1;
+        continue;
+      }
+      const relFromNm = target.slice(idx + nmMarker.length);
+      const newAbs = join(outDir, "node_modules", relFromNm);
+      const rel = relative(binDir, newAbs);
+      unlinkSync(linkPath);
+      symlinkSync(rel, linkPath);
+      rewrittenBins += 1;
+    }
+  }
+
+  const paperclipBin = join(outDir, "node_modules/.bin/paperclipai");
+  let paperclipTarget = null;
+  try {
+    paperclipTarget = readlinkSync(paperclipBin);
+  } catch {
+    paperclipTarget = null;
+  }
+
+  // #region agent log
+  dbg("A", "package-immutable-release.mjs:post-bin-fix", "paperclipai bin after rewrite", {
+    rewrittenBins,
+    danglingBins,
+    exists: existsSync(paperclipBin),
+    target: paperclipTarget,
+    resolvesToFile: existsSync(join(outDir, "node_modules/paperclipai/dist/index.js")),
+  });
+  // #endregion
+
+  if (!existsSync(paperclipBin) || !existsSync(join(outDir, "node_modules/paperclipai/dist/index.js"))) {
+    throw new Error("paperclipai bin broken after outDir promotion (absolute symlink leak)");
+  }
+
   console.log(`Release ready: ${outDir}`);
-  console.log(JSON.stringify({ candidateSha, releaseDigest: manifest.releaseDigest }, null, 2));
+  console.log(JSON.stringify({ candidateSha, releaseDigest: manifest.releaseDigest, rewrittenBins }, null, 2));
 } finally {
   rmSync(packsDir, { recursive: true, force: true });
   rmSync(stageDir, { recursive: true, force: true });
