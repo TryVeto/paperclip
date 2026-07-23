@@ -60,3 +60,9 @@ node scripts/audit-v007-live-safe.mjs
 - Did **not** open or unlock v0.08 (VET-582 / issue `6af9647b-…` remains `backlog`).
 - Did **not** cut over live (already on Section-2 closed `b314bcf41…`).
 - Did **not** claim safe close.
+
+---
+
+## Superseded (same day)
+
+Sebastian pushed both Mac pins to `TryVeto/paperclip` tags. Host fetch + `audit-v007-live-safe.mjs` exit **0** with all EXACT_GIT checks **PASS**. See `2026-07-23-paperclip-v0.07-mac-pins-cleared.md`. **SPEC-2 FIXED.** Still not overall safe close; v0.08 LOCKED.
