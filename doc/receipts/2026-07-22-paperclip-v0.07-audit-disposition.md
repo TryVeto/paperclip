@@ -2,37 +2,40 @@
 
 | Field | Value |
 |---|---|
-| Status | **Agree: not safely closed.** v0.08 remains blocked. |
-| Audit snapshot | Codex evidence through ~21:58 PDT (70 recovery failures / 144 missing-column errors) |
-| Live at disposition | Deployed `48b9569…`; columns present; post-22:00 PDT missing-column errors = 0 |
-| Spec blob | `c9a2782c8e42c99d46729f54d4bc74bbe511a4e0` (unchanged) |
+| Status | **FAIL accepted — deployed but not safely closed. Do not open v0.08.** |
+| Audit time | 2026-07-22 21:59 PDT (Codex, read-only) |
+| Spec blob |  |
+| Spec commit |  |
+| Live release (at audit / still) |  |
 
-## P0 findings — disposition
+## Spec findings
 
-| Finding | Verdict | Notes |
+| ID | Severity | Disposition |
 |---|---|---|
-| `0186` expected but not applied; recovery failing; health green | **Confirmed at audit time.** | Root cause: nested `dist/migrations/migrations` so auto-apply never saw `0186` while schema selected new columns. **Live remediations after audit:** SQL applied; outer journal patched; build script `rm -rf dist/migrations` before copy (`faacf54`). Post-22:00 PDT: 0 `traffic_class` / 0 recovery failures (runtime check). |
-| `48b956…` not resolvable on origin / host mirrors | **Confirmed.** | Commit exists only in local worktree `veto/paperclip-v0.07`. `origin` = `paperclipai/paperclip`; `git ls-remote origin 48b9569` empty. Exact-SHA ship without a published ref is **not** audit-safe proof. |
-| Ship record rewritten `3c50854` → `f852853` → `48b9569` | **Accepted as unsafe closure pattern.** | Board `voidShip` + re-`closeShip` was used for incident repair; that does not equal a single immutable first-close. Capsule still reports `displayState=shipped` for v0.07 only. |
+| SPEC-1 | P0 | **Confirmed at audit.** Unapplied  / missing columns / recovery loop while health=ok. **Ops patch after audit (not a safe close):** columns +  present on live; missing-column errors since 22:00 PDT = ; recovery failures since 22:00 = . Live probe: . Nested migration packaging root cause remains a closure defect until a clean rebuild from published source. |
+| SPEC-2 | P0 | **Confirmed.**  is a local worktree commit () but not on  (ls-remote hits=). Manifest digests ≠ git identity / installed runtime bytes. |
+| SPEC-3 | P0 | **Confirmed.** Capsule void/reclose  →  →  mutates the active shipped record. Violates post-ship immutability. |
+| SPEC-4 | P1 | **Confirmed.** Verification receipt insufficient (descendants=0, no decomposition, no Cursor ancestry/artifacts). |
+| SPEC-5 | P1 | **Confirmed.** Journal/index reuse + dual migration trees caused SPEC-1. |
+| SPEC-6 | P1 | **Confirmed.** Lane-isolation acceptance not demonstrated before closeout. |
 
-## P1 findings — disposition
+## Standards findings
 
-| Finding | Verdict |
-|---|---|
-| Verification with zero descendants / no decomposition / no test artifacts | **Agreed as weak gate for this close.** Bootstrap path allowed ship_ready with descendants=0; not a substitute for implementation proof. |
-| Migration history `0182` reuse / journal idx `178` dup / dual migration trees | **Agreed for shipped `48b9569` artifact.** Nested tree was the live failure mode; journal hygiene still needs a clean rebuild + published SHA. |
-| Instruction stack conflicts (AGENTS.md → V1 SPEC; hiring prompt inert; summarizer write contract) | **Agreed; not fixed in this disposition.** `AGENTS.md` still points contributors to `doc/SPEC-implementation.md` instead of binding `doc/plans/2026-07-22-paperclip-v0.07.md`. |
+| ID | Severity | Disposition |
+|---|---|---|
+| STD-1 | P1 | Accepted — instruction precedence vs Cursor-only contract. |
+| STD-2 | P1 | Accepted — repo  still points at V1 SPEC / stale Hermes context. |
+| STD-3 | P1 | Accepted — host-level mandatory paths missing (outside this worktree). |
+| STD-4 | P1 | Accepted — board hiring  inert vs . |
+| STD-5 | P1 | Accepted — summarizer / CEO instruction contradictions. |
+| STD-6 | P2 | Accepted — instruction load fails open; adapter resume differences. |
 
-## Required for a future *safe* close (do not open v0.08 until done)
+## Required closure (unchanged from audit)
 
-1. Publish candidate commits to a board-reachable remote/ref (not only local worktree strings).
-2. Rebuild release with flat migrations + matching journal tip including `0186`; prove auto-apply on a clean DB copy; no nested `migrations/migrations`.
-3. One honest close against that published SHA (or an explicit board-approved reopen policy that preserves full receipt_history in the API surface).
-4. Strengthen verification beyond descendants=0 bootstrap empty-set (tests / decomposition / ancestry as the version contract requires for non-bootstrap work).
-5. Align AGENTS.md / board skills / summarizer boundary with the v0.07 Cursor-code contract.
+Follow Codex steps 1–7. Especially: publish durable Git candidate; flat migration identity; immutable ship records (append-only observations); server-observed verification; acceptance tests persisted; collapse instruction stack; restart natural-run observer only after clean recovery and canary exclusion.
 
 ## Explicit non-actions
 
-- **Do not open or activate v0.08.**
-- Do not treat health=ok as migration proof.
-- Do not treat equal 40-hex strings alone as exact-SHA proof without object resolvability.
+- Do **not** open/activate v0.08.
+- Do **not** treat post-audit ops patches ( apply, /, userns sysctl, nested-migration build fix) as satisfying SPEC-2/3/4 or safe close.
+- Do **not** treat  as migration or heartbeat-recovery proof.
