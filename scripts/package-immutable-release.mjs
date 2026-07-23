@@ -36,6 +36,61 @@ import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendFileSync } from "node:fs";
 
+/** Walk outDir; rewrite absolute symlinks that still point into stageDir to relative targets. */
+function rewriteStageAbsoluteSymlinks(rootDir, stageRoot) {
+  const stageResolved = resolve(stageRoot);
+  let rewritten = 0;
+  let dangling = 0;
+  const samples = [];
+  const stack = [rootDir];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries;
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const ent of entries) {
+      const full = join(dir, ent.name);
+      // Prefer symlink check first — dirents that point at directories still report isDirectory().
+      if (ent.isSymbolicLink()) {
+        // fall through to rewrite below
+      } else if (ent.isDirectory()) {
+        stack.push(full);
+        continue;
+      } else {
+        continue;
+      }
+      let target;
+      try {
+        target = readlinkSync(full);
+      } catch {
+        continue;
+      }
+      if (!target.startsWith("/")) continue;
+      const targetResolved = resolve(target);
+      if (!targetResolved.startsWith(stageResolved + "/") && targetResolved !== stageResolved) {
+        dangling += 1;
+        continue;
+      }
+      const mappedAbs = join(rootDir, relative(stageResolved, targetResolved));
+      const rel = relative(dirname(full), mappedAbs);
+      unlinkSync(full);
+      symlinkSync(rel, full);
+      rewritten += 1;
+      if (samples.length < 5) {
+        samples.push({
+          link: relative(rootDir, full),
+          old: target,
+          new: rel,
+        });
+      }
+    }
+  }
+  return { rewritten, dangling, samples };
+}
+
 const DEBUG_LOG = "/home/sebastianheyneman_tryveto_com/.cursor/debug-02fbe2.log";
 function dbg(hypothesisId, location, message, data) {
   const payload = {
@@ -220,51 +275,36 @@ try {
   mkdirSync(dirname(outDir), { recursive: true });
   cpSync(stageDir, outDir, { recursive: true });
 
-  // #region agent log
-  dbg("A", "package-immutable-release.mjs:pre-bin-fix", "sample .bin target before rewrite", {
+  const icuLink = join(
     outDir,
-    sample: (() => {
+    "node_modules/@embedded-postgres/linux-x64/native/lib/libicui18n.so.60",
+  );
+  // #region agent log
+  dbg("B", "package-immutable-release.mjs:pre-symlink-fix", "absolute stage symlinks before rewrite", {
+    outDir,
+    stageDir,
+    binSample: (() => {
       try {
         return readlinkSync(join(outDir, "node_modules/.bin/paperclipai"));
       } catch (e) {
         return String(e);
       }
     })(),
-    existsBefore: existsSync(join(outDir, "node_modules/.bin/paperclipai")),
+    icuSample: (() => {
+      try {
+        return readlinkSync(icuLink);
+      } catch (e) {
+        return String(e);
+      }
+    })(),
+    icuExistsBefore: existsSync(icuLink),
   });
   // #endregion
 
-  // npm may create absolute .bin symlinks into stageDir; after stage cleanup those
-  // become dangling. Rewrite to relative targets inside outDir (matches live releases).
-  const binDir = join(outDir, "node_modules/.bin");
-  let rewrittenBins = 0;
-  let danglingBins = 0;
-  if (existsSync(binDir)) {
-    for (const name of readdirSync(binDir)) {
-      const linkPath = join(binDir, name);
-      let st;
-      try {
-        st = lstatSync(linkPath);
-      } catch {
-        continue;
-      }
-      if (!st.isSymbolicLink()) continue;
-      const target = readlinkSync(linkPath);
-      if (!target.startsWith("/")) continue;
-      const nmMarker = "/node_modules/";
-      const idx = target.lastIndexOf(nmMarker);
-      if (idx < 0) {
-        danglingBins += 1;
-        continue;
-      }
-      const relFromNm = target.slice(idx + nmMarker.length);
-      const newAbs = join(outDir, "node_modules", relFromNm);
-      const rel = relative(binDir, newAbs);
-      unlinkSync(linkPath);
-      symlinkSync(rel, linkPath);
-      rewrittenBins += 1;
-    }
-  }
+  // npm / package postinstall may create absolute symlinks into stageDir (.bin,
+  // embedded-postgres native/lib, etc.). After stage cleanup those dangle.
+  // Rewrite every absolute link that still points into stageDir to a relative target.
+  const { rewritten, dangling, samples } = rewriteStageAbsoluteSymlinks(outDir, stageDir);
 
   const paperclipBin = join(outDir, "node_modules/.bin/paperclipai");
   let paperclipTarget = null;
@@ -273,23 +313,41 @@ try {
   } catch {
     paperclipTarget = null;
   }
+  let icuTarget = null;
+  try {
+    icuTarget = readlinkSync(icuLink);
+  } catch {
+    icuTarget = null;
+  }
 
   // #region agent log
-  dbg("A", "package-immutable-release.mjs:post-bin-fix", "paperclipai bin after rewrite", {
-    rewrittenBins,
-    danglingBins,
-    exists: existsSync(paperclipBin),
-    target: paperclipTarget,
-    resolvesToFile: existsSync(join(outDir, "node_modules/paperclipai/dist/index.js")),
+  dbg("B", "package-immutable-release.mjs:post-symlink-fix", "symlinks after stage-absolute rewrite", {
+    rewritten,
+    dangling,
+    samples,
+    binTarget: paperclipTarget,
+    binExists: existsSync(paperclipBin),
+    icuTarget,
+    icuExists: existsSync(icuLink),
+    icuIsAbsolute: typeof icuTarget === "string" && icuTarget.startsWith("/"),
   });
   // #endregion
 
   if (!existsSync(paperclipBin) || !existsSync(join(outDir, "node_modules/paperclipai/dist/index.js"))) {
     throw new Error("paperclipai bin broken after outDir promotion (absolute symlink leak)");
   }
+  if (existsSync(dirname(icuLink)) && (!existsSync(icuLink) || (icuTarget && icuTarget.startsWith("/")))) {
+    throw new Error("embedded-postgres ICU symlink broken after outDir promotion (absolute symlink leak)");
+  }
 
   console.log(`Release ready: ${outDir}`);
-  console.log(JSON.stringify({ candidateSha, releaseDigest: manifest.releaseDigest, rewrittenBins }, null, 2));
+  console.log(
+    JSON.stringify(
+      { candidateSha, releaseDigest: manifest.releaseDigest, rewrittenSymlinks: rewritten, danglingSymlinks: dangling },
+      null,
+      2,
+    ),
+  );
 } finally {
   rmSync(packsDir, { recursive: true, force: true });
   rmSync(stageDir, { recursive: true, force: true });
