@@ -4,15 +4,23 @@
 |---|---|
 | Status | **FAIL residual — only exact-git Mac pins remain as P0. v0.08 LOCKED.** |
 | Live | `b314bcf41d46d3207cc609606452b0845a4abf4a` |
-| Source HEAD | `33f77bc8078c0cc85257bb8868feb1e334a5e818` (+ this receipt) |
+| Source HEAD (at proof) | `77b8fe1d4fbad1d05bc58848c93cbe4785566ab6` |
 | Spec blob (present) | `c9a2782c8e42c99d46729f54d4bc74bbe511a4e0` |
 | Host reconstruction spec commit | `c0c50b4eaf7131cae4cb3b98ab567db2288d2182` (blob-identical; **not** Mac `11f92018…`) |
 | Product base pin (object missing) | `9cad4cb71670c00191e52ab44e877156dfaf2118` |
 | Spec commit pin (object missing) | `11f920182fdf908e2476c144505b1e659427015d` |
 
+## Companion P0 dispositions (this wake)
+
+| ID | Verdict |
+|---|---|
+| SPEC-1 (0186 / journal / recovery) | **FIXED** — see `2026-07-23-paperclip-v0.07-p0-closeout.md` |
+| SPEC-2 (durable exact-git) | **PARTIAL** — live + closeout SHAs on tryveto; **these two Mac pins only** still missing |
+| SPEC-3 (ship immutability) | **FIXED** forward — casual void → `shipped_record_immutable`; history archived |
+
 ## Fresh live-safe audit (this wake)
 
-Script: `scripts/audit-v007-live-safe.mjs` → `/tmp/audit-v007-live-safe.out`
+Script: `scripts/audit-v007-live-safe.mjs` → `/tmp/audit-v007-live-safe.out` (exit 2)
 
 | Check | Result |
 |---|---|
@@ -21,8 +29,8 @@ Script: `scripts/audit-v007-live-safe.mjs` → `/tmp/audit-v007-live-safe.out`
 | Startup `digestVerify.ok` + `installedRuntimeOk` | **PASS** |
 | Recovery: missing-column / paused-wake spam since `b314` cutover | **PASS** (0 / 0) |
 | Host reconstruction blob pin | **PASS** |
-| Exact-git product base `9cad4cb…` | **FAIL — Mac-only** |
-| Exact-git spec commit `11f92018…` | **FAIL — Mac-only** |
+| Exact-git product base `9cad4cb…` | **FAIL — Mac-only** (absent locally + tryveto 422) |
+| Exact-git spec commit `11f92018…` | **FAIL — Mac-only** (absent locally + tryveto 422) |
 
 ## What is blocked without Sebastian
 
@@ -49,7 +57,6 @@ node scripts/audit-v007-live-safe.mjs
 
 ## Explicit non-actions
 
-- Did **not** open or unlock v0.08 (VET-582 remains `backlog`).
+- Did **not** open or unlock v0.08 (VET-582 / issue `6af9647b-…` remains `backlog`).
 - Did **not** cut over live (already on Section-2 closed `b314bcf41…`).
-- Removed debug ingest instrumentation from paused-wake skip (post-fix already proved).
 - Did **not** claim safe close.
