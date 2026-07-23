@@ -49,6 +49,15 @@ type Tx = Parameters<Parameters<Db["transaction"]>[0]>[0];
 const FREEZE_OPENS_ENV = "PAPERCLIP_FREEZE_VERSION_OPENS";
 const THINKING_ZERO_AGENT_NAME = "Thinking-zero";
 
+type VerificationCheck = {
+  name: string;
+  passed: boolean;
+  detail?: string;
+  command?: string;
+  artifactRef?: string;
+  timestamp?: string;
+};
+
 function parseBootstrapImplementationFacts(body: string): {
   ok: boolean;
   missing: string[];

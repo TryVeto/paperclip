@@ -341,26 +341,13 @@ export function projectRoutes(db: Db) {
     if (!project) return;
     assertBoard(req);
     try {
-      const result = await versions.voidShip(project.id, {
+      // voidShip never returns: closed capsules are immutable (shipped_record_immutable);
+      // unshipped capsules reject with version_not_shipped.
+      await versions.voidShip(project.id, {
         versionKey: req.params.versionKey as string,
         reason: req.body.reason,
       });
-      const actor = getActorInfo(req);
-      await logActivity(db, {
-        companyId: project.companyId,
-        actorType: actor.actorType,
-        actorId: actor.actorId,
-        agentId: actor.agentId,
-        action: "version.ship_voided",
-        entityType: "project_version_contract",
-        entityId: result.id,
-        details: {
-          versionKey: result.versionKey,
-          reason: req.body.reason ?? "board_void_ship",
-          archivedDeployedSourceSha: (result.archived as { deployedSourceSha?: string }).deployedSourceSha,
-        },
-      });
-      res.json(result);
+      res.status(500).json({ error: "void_ship_unreachable_success" });
     } catch (err) {
       if (err instanceof HttpError) {
         res.status(err.status).json({ error: err.message, details: err.details });
