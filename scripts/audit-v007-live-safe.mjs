@@ -4,7 +4,7 @@
  * Does not mutate DB, capsules, or the release tree.
  */
 import { execFileSync, execSync } from "node:child_process";
-import { existsSync, appendFileSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 
 const LIVE_LINK = "/home/droid/.local/lib/paperclip-veto-mainline-cloud";
@@ -213,32 +213,5 @@ const summary = {
   v008: "LOCKED",
 };
 console.log(JSON.stringify(summary, null, 2));
-
-try {
-  appendFileSync(
-    "/home/sebastianheyneman_tryveto_com/.cursor/debug-02fbe2.log",
-    JSON.stringify({
-      sessionId: "02fbe2",
-      runId: "live-safe-audit",
-      hypothesisId: "MAC",
-      location: "scripts/audit-v007-live-safe.mjs",
-      message: "fresh live-safe audit",
-      data: {
-        liveSha,
-        sourceHead,
-        p0Fail: summary.p0Fail,
-        failed: summary.failed,
-        wakeSpam,
-        missingCol,
-        productObj,
-        specObj,
-        localSpecBlob,
-      },
-      timestamp: Date.now(),
-    }) + "\n",
-  );
-} catch {
-  /* ignore */
-}
 
 process.exit(p0Fail.length === 0 ? 0 : 2);
